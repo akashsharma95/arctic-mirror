@@ -49,11 +49,26 @@ func (m *Manager) HandleRelationMessage(msg *pglogrepl.RelationMessageV2) error 
 		Columns: make([]Column, len(msg.Columns)),
 	}
 
+	// Try to use previously loaded schema information to obtain
+	// column nullability and type names. Relation messages do not
+	// include this information, only whether a column is part of the
+	// replica identity. Fall back to assuming columns are nullable
+	// if we have no prior knowledge.
+	existing, _ := m.schemasByName[fmt.Sprintf("%s.%s", msg.Namespace, msg.RelationName)]
+
 	for i, col := range msg.Columns {
+		nullable := true
+		typeName := ""
+		if existing != nil && i < len(existing.Columns) && existing.Columns[i].Name == col.Name {
+			nullable = existing.Columns[i].Nullable
+			typeName = existing.Columns[i].TypeName
+		}
+
 		schema.Columns[i] = Column{
 			Name:     col.Name,
 			TypeOID:  col.DataType,
-			Nullable: (col.Flags & pglogrepl.TupleDataTypeNull) == 0,
+			TypeName: typeName,
+			Nullable: nullable,
 		}
 	}
 
