@@ -23,7 +23,8 @@ type Config struct {
 	} `yaml:"tables"`
 
 	Iceberg struct {
-		Path string `yaml:"path"`
+		Path       string `yaml:"path"`
+		FileSizeMB int    `yaml:"file_size_mb"`
 	} `yaml:"iceberg"`
 
 	Proxy struct {

@@ -22,6 +22,7 @@ type Writer struct {
 	writers       map[uint32]*tableWriter
 	mu            sync.RWMutex
 	schemaManager *schema.Manager
+	maxFileSize   int64
 }
 
 type tableWriter struct {
@@ -29,18 +30,23 @@ type tableWriter struct {
 	parquetSchema *parquet.Schema
 	writer        *parquet.GenericWriter[map[string]interface{}]
 	path          string
+	schemaName    string
+	tableName     string
 	records       int64
 	metadata      *TableMetadata
 	manifests     []ManifestEntry
 	mu            sync.Mutex
 	file          *os.File
+	basePath      string
+	maxFileSize   int64
 }
 
-func NewWriter(basePath string, schemaManager *schema.Manager) (*Writer, error) {
+func NewWriter(basePath string, schemaManager *schema.Manager, maxFileSizeMB int) (*Writer, error) {
 	return &Writer{
 		basePath:      basePath,
 		writers:       make(map[uint32]*tableWriter),
 		schemaManager: schemaManager,
+		maxFileSize:   int64(maxFileSizeMB) * 1024 * 1024,
 	}, nil
 }
 
@@ -63,7 +69,7 @@ func (w *Writer) WriteInsert(msg *pglogrepl.InsertMessageV2, rel *pglogrepl.Rela
 	}
 
 	tw.records++
-	return nil
+	return tw.rotateIfNeeded()
 }
 
 func (w *Writer) WriteUpdate(msg *pglogrepl.UpdateMessageV2, rel *pglogrepl.RelationMessageV2) error {
@@ -85,7 +91,7 @@ func (w *Writer) WriteUpdate(msg *pglogrepl.UpdateMessageV2, rel *pglogrepl.Rela
 	}
 
 	tw.records++
-	return nil
+	return tw.rotateIfNeeded()
 }
 
 func (w *Writer) WriteDelete(msg *pglogrepl.DeleteMessageV2, rel *pglogrepl.RelationMessageV2) error {
@@ -187,9 +193,13 @@ func (w *Writer) createWriter(relationID uint32) (*tableWriter, error) {
 		parquetSchema: parquetSchema,
 		writer:        pw,
 		path:          dataPath,
+		schemaName:    pgSchema.Schema,
+		tableName:     pgSchema.Name,
 		metadata:      metadata,
 		file:          file,
 		manifests:     make([]ManifestEntry, 0),
+		basePath:      w.basePath,
+		maxFileSize:   w.maxFileSize,
 	}, nil
 }
 
@@ -313,59 +323,49 @@ func (tw *tableWriter) commit(ctx context.Context) error {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 
-	// Close Parquet writer
-	if err := tw.writer.Close(); err != nil {
-		return fmt.Errorf("closing parquet writer: %w", err)
+	if tw.writer != nil {
+		if err := tw.finalizeCurrentFile(); err != nil {
+			return err
+		}
 	}
 
-	// Collect metrics
-	metrics := tw.collectMetrics()
-
-	fileInfo, err := tw.file.Stat()
-	if err != nil {
-		return fmt.Errorf("getting file size: %w", err)
+	if len(tw.manifests) == 0 {
+		return nil
 	}
 
-	// Create manifest entry
-	entry := ManifestEntry{
-		Status:     1, // Added
-		SnapshotID: time.Now().UnixNano() / int64(time.Millisecond),
-		DataFile: DataFile{
-			FilePath:      tw.path,
-			FileFormat:    "PARQUET",
-			RecordCount:   tw.records,
-			FileSizeBytes: fileInfo.Size(),
-			Metrics:       metrics,
-		},
+	snapshotID := time.Now().UnixNano() / int64(time.Millisecond)
+	for i := range tw.manifests {
+		tw.manifests[i].SnapshotID = snapshotID
 	}
 
-	tw.manifests = append(tw.manifests, entry)
-
-	// Write manifest file
-	manifestPath := fmt.Sprintf("manifests/manifest_%d.avro", entry.SnapshotID)
+	manifestPath := fmt.Sprintf("manifests/manifest_%d.avro", snapshotID)
 	if err := tw.writeManifest(ctx, manifestPath); err != nil {
 		return fmt.Errorf("writing manifest: %w", err)
 	}
 
-	// Update metadata
+	totalRecords := int64(0)
+	for _, m := range tw.manifests {
+		totalRecords += m.DataFile.RecordCount
+	}
+
 	tw.metadata.CurrentSnapshot = &Snapshot{
-		SnapshotID:   entry.SnapshotID,
-		TimestampMs:  entry.SnapshotID,
+		SnapshotID:   snapshotID,
+		TimestampMs:  snapshotID,
 		ManifestList: manifestPath,
 		Summary: map[string]string{
-			"added-data-files": "1",
+			"added-data-files": fmt.Sprintf("%d", len(tw.manifests)),
 			"total-data-files": fmt.Sprintf("%d", len(tw.manifests)),
-			"total-records":    fmt.Sprintf("%d", tw.records),
+			"total-records":    fmt.Sprintf("%d", totalRecords),
 		},
 	}
 	tw.metadata.Snapshots = append(tw.metadata.Snapshots, tw.metadata.CurrentSnapshot)
 
-	// Write metadata
 	metadataPath := filepath.Join(tw.metadata.Location, "metadata.json")
 	if err := tw.writeMetadata(ctx, tw.metadata, metadataPath); err != nil {
 		return fmt.Errorf("writing metadata: %w", err)
 	}
 
+	tw.manifests = nil
 	return nil
 }
 
@@ -415,6 +415,74 @@ func (tw *tableWriter) writeMetadata(ctx context.Context, metadata *TableMetadat
 		return fmt.Errorf("encoding metadata: %w", err)
 	}
 
+	return nil
+}
+
+func (tw *tableWriter) rotateIfNeeded() error {
+	if tw.maxFileSize == 0 {
+		return nil
+	}
+	info, err := tw.file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < tw.maxFileSize {
+		return nil
+	}
+	if err := tw.finalizeCurrentFile(); err != nil {
+		return err
+	}
+	return tw.startNewFile()
+}
+
+func (tw *tableWriter) finalizeCurrentFile() error {
+	if tw.writer == nil {
+		return nil
+	}
+	if err := tw.writer.Close(); err != nil {
+		return fmt.Errorf("closing parquet writer: %w", err)
+	}
+	metrics := tw.collectMetrics()
+	info, err := tw.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat file: %w", err)
+	}
+	entry := ManifestEntry{
+		Status: 1,
+		DataFile: DataFile{
+			FilePath:      tw.path,
+			FileFormat:    "PARQUET",
+			RecordCount:   tw.records,
+			FileSizeBytes: info.Size(),
+			Metrics:       metrics,
+		},
+	}
+	tw.manifests = append(tw.manifests, entry)
+	tw.writer = nil
+	tw.file.Close()
+	tw.records = 0
+	return nil
+}
+
+func (tw *tableWriter) startNewFile() error {
+	dataPath := fmt.Sprintf(
+		"data/%s.%s/%s.parquet",
+		tw.schemaName,
+		tw.tableName,
+		time.Now().Format("20060102150405"),
+	)
+	fullPath := filepath.Join(tw.basePath, dataPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Errorf("creating directories: %w", err)
+	}
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return fmt.Errorf("creating parquet file: %w", err)
+	}
+	pw := parquet.NewGenericWriter[map[string]interface{}](file, tw.parquetSchema)
+	tw.writer = pw
+	tw.file = file
+	tw.path = dataPath
 	return nil
 }
 
