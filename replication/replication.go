@@ -65,7 +65,7 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 	}
 
 	// Initialize Iceberg writer
-	writer, err := iceberg.NewWriter(cfg.Iceberg.Path, schemaManager)
+	writer, err := iceberg.NewWriter(cfg.Iceberg.Path, schemaManager, cfg.Iceberg.FileSizeMB)
 	if err != nil {
 		return nil, fmt.Errorf("creating iceberg writer: %w", err)
 	}
@@ -120,7 +120,7 @@ func (r *Replicator) startReplication(ctx context.Context) error {
 		PluginArgs: []string{
 			"proto_version '2'",
 			"messages 'true'",
-			"streaming 'true'",
+			"streaming 'false'",
 			fmt.Sprintf("publication_names '%s'", r.config.Postgres.Publication), // Use the actual publication name
 		},
 	})
@@ -217,7 +217,7 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				log.Println("Begin transaction")
 
 			case *pglogrepl.CommitMessage:
-				// Handle commit
+				log.Printf("Commit at %s", m.CommitLSN)
 				if err := r.writer.Commit(); err != nil {
 					return fmt.Errorf("committing: %w", err)
 				}
@@ -262,7 +262,10 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				inStream = false
 				log.Printf("Stream stop message")
 			case *pglogrepl.StreamCommitMessageV2:
-				log.Printf("Stream commit message")
+				log.Printf("Stream commit for xid %d", m.Xid)
+				if err := r.writer.Commit(); err != nil {
+					return fmt.Errorf("committing: %w", err)
+				}
 			case *pglogrepl.StreamAbortMessageV2:
 				log.Printf("Stream abort message")
 			default:

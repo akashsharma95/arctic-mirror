@@ -15,6 +15,7 @@ import (
 
 func main() {
 	configFile := flag.String("config", "config.yaml", "Path to config file")
+	enableProxy := flag.Bool("proxy", false, "Start DuckDB proxy server")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig(*configFile)
@@ -28,9 +29,13 @@ func main() {
 		log.Fatalf("Failed to create replicator: %v", err)
 	}
 
-	proxy, err := proxy.NewDuckDBProxy(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create proxy: %v", err)
+	var duckProxy *proxy.DuckDBProxy
+	if *enableProxy {
+		var err error
+		duckProxy, err = proxy.NewDuckDBProxy(cfg)
+		if err != nil {
+			log.Fatalf("Failed to create proxy: %v", err)
+		}
 	}
 
 	// Create context with cancellation
@@ -49,13 +54,14 @@ func main() {
 		}
 	}()
 
-	// Start proxy server
-	go func() {
-		if err := proxy.Start(ctx); err != nil {
-			log.Printf("Proxy error: %v", err)
-			cancel()
-		}
-	}()
+	if duckProxy != nil {
+		go func() {
+			if err := duckProxy.Start(ctx); err != nil {
+				log.Printf("Proxy error: %v", err)
+				cancel()
+			}
+		}()
+	}
 
 	// Wait for shutdown signal
 	select {

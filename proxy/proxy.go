@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"os"
 
 	"arctic-mirror/config"
 
@@ -25,6 +26,9 @@ func NewDuckDBProxy(cfg *config.Config) (*DuckDBProxy, error) {
 		return nil, fmt.Errorf("opening duckdb: %w", err)
 	}
 
+	// Ensure extensions are downloaded over HTTPS
+	os.Setenv("DUCKDB_EXTENSION_REPOSITORY", "https://extensions.duckdb.org")
+
 	// Install and load extensions
 	if err := loadExtensions(db); err != nil {
 		return nil, fmt.Errorf("loading extensions: %w", err)
@@ -44,10 +48,10 @@ func NewDuckDBProxy(cfg *config.Config) (*DuckDBProxy, error) {
 }
 
 func loadExtensions(db *sql.DB) error {
-	extensions := []string{"iceberg", "parquet"}
-	for _, ext := range extensions {
-		if _, err := db.Exec(fmt.Sprintf("INSTALL %s; LOAD %s;", ext, ext)); err != nil {
-			return fmt.Errorf("loading extension %s: %w", ext, err)
+	exts := []string{"httpfs", "iceberg", "parquet"}
+	for _, e := range exts {
+		if _, err := db.Exec(fmt.Sprintf("INSTALL %s; LOAD %s;", e, e)); err != nil {
+			return fmt.Errorf("loading extension %s: %w", e, err)
 		}
 	}
 	return nil
