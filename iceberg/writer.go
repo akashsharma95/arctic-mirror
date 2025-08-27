@@ -37,6 +37,23 @@ type tableWriter struct {
 }
 
 func NewWriter(basePath string, schemaManager *schema.Manager) (*Writer, error) {
+	// Validate that the base path is accessible
+	if basePath == "" {
+		return nil, fmt.Errorf("base path cannot be empty")
+	}
+
+	// Check if we can create the directory (or if it already exists and is writable)
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create or access base path %s: %w", basePath, err)
+	}
+
+	// Test if we can write to the directory
+	testFile := filepath.Join(basePath, ".test_write")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		return nil, fmt.Errorf("cannot write to base path %s: %w", basePath, err)
+	}
+	os.Remove(testFile) // Clean up test file
+
 	return &Writer{
 		basePath:      basePath,
 		writers:       make(map[uint32]*tableWriter),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"net"
 
 	"arctic-mirror/config"
@@ -54,19 +55,41 @@ func loadExtensions(db *sql.DB) error {
 }
 
 func (p *DuckDBProxy) Start(ctx context.Context) error {
+	log.Printf("Starting DuckDB proxy server on port %d", p.config.Proxy.Port)
+	
 	for {
-		conn, err := p.listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				continue
+		select {
+		case <-ctx.Done():
+			log.Println("Proxy server shutting down...")
+			return ctx.Err()
+		default:
+			conn, err := p.listener.Accept()
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					log.Printf("Accept error: %v", err)
+					continue
+				}
 			}
-		}
 
-		go p.handleConnection(ctx, conn)
+			go p.handleConnection(ctx, conn)
+		}
 	}
+}
+
+// GetDB returns the database connection for health checks
+func (p *DuckDBProxy) GetDB() *sql.DB {
+	return p.db
+}
+
+// Close closes the proxy and cleans up resources
+func (p *DuckDBProxy) Close() error {
+	if p.listener != nil {
+		return p.listener.Close()
+	}
+	return nil
 }
 
 func (p *DuckDBProxy) handleConnection(ctx context.Context, conn net.Conn) {

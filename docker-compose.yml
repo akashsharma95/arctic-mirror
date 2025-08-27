@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: arctic-mirror-postgres
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: replicator
+      POSTGRES_PASSWORD: secret
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replicator -d mydb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - arctic-mirror-network
+
+  arctic-mirror:
+    build: .
+    container_name: arctic-mirror-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=replicator
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=mydb
+    ports:
+      - "5433:5433"  # DuckDB proxy
+      - "8080:8080"  # Health checks
+    volumes:
+      - warehouse_data:/data/warehouse
+      - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - arctic-mirror-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a simple test client
+  test-client:
+    image: postgres:15-alpine
+    container_name: arctic-mirror-test-client
+    depends_on:
+      - arctic-mirror
+    environment:
+      - PGHOST=arctic-mirror
+      - PGPORT=5433
+      - PGUSER=replicator
+      - PGPASSWORD=secret
+      - PGDATABASE=mydb
+    command: >
+      sh -c "
+        echo 'Waiting for Arctic Mirror to be ready...' &&
+        while ! pg_isready -h arctic-mirror -p 5433; do sleep 1; done &&
+        echo 'Testing connection...' &&
+        psql -h arctic-mirror -p 5433 -U replicator -d mydb -c 'SELECT 1 as test;'
+      "
+    networks:
+      - arctic-mirror-network
+
+volumes:
+  postgres_data:
+    driver: local
+  warehouse_data:
+    driver: local
+
+networks:
+  arctic-mirror-network:
+    driver: bridge
