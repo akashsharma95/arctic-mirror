@@ -327,63 +327,8 @@ func decodeColumnData(typeMap *pgtype.Map, data []byte, dataTypeOID uint32, form
 }
 
 func (tw *tableWriter) commit(ctx context.Context) error {
-	tw.mu.Lock()
-	defer tw.mu.Unlock()
-
-	// Close Parquet writer
-	if err := tw.writer.Close(); err != nil {
-		return fmt.Errorf("closing parquet writer: %w", err)
-	}
-
-	// Collect metrics
-	metrics := tw.collectMetrics()
-
-	fileInfo, err := tw.file.Stat()
-	if err != nil {
-		return fmt.Errorf("getting file size: %w", err)
-	}
-
-	// Create manifest entry
-	entry := ManifestEntry{
-		Status:     1, // Added
-		SnapshotID: time.Now().UnixNano() / int64(time.Millisecond),
-		DataFile: DataFile{
-			FilePath:      tw.path,
-			FileFormat:    "PARQUET",
-			RecordCount:   tw.records,
-			FileSizeBytes: fileInfo.Size(),
-			Metrics:       metrics,
-		},
-	}
-
-	tw.manifests = append(tw.manifests, entry)
-
-	// Write manifest file
-	manifestPath := fmt.Sprintf("manifests/manifest_%d.avro", entry.SnapshotID)
-	if err := tw.writeManifest(ctx, manifestPath); err != nil {
-		return fmt.Errorf("writing manifest: %w", err)
-	}
-
-	// Update metadata
-	tw.metadata.CurrentSnapshot = &Snapshot{
-		SnapshotID:   entry.SnapshotID,
-		TimestampMs:  entry.SnapshotID,
-		ManifestList: manifestPath,
-		Summary: map[string]string{
-			"added-data-files": "1",
-			"total-data-files": fmt.Sprintf("%d", len(tw.manifests)),
-			"total-records":    fmt.Sprintf("%d", tw.records),
-		},
-	}
-	tw.metadata.Snapshots = append(tw.metadata.Snapshots, tw.metadata.CurrentSnapshot)
-
-	// Write metadata
-	metadataPath := filepath.Join(tw.metadata.Location, "metadata.json")
-	if err := tw.writeMetadata(ctx, tw.metadata, metadataPath); err != nil {
-		return fmt.Errorf("writing metadata: %w", err)
-	}
-
-	return nil
+	// This method is deprecated - use Close() instead
+	return fmt.Errorf("commit() is deprecated, use Close() instead")
 }
 
 func (tw *tableWriter) collectMetrics() FileMetrics {
@@ -430,6 +375,129 @@ func (tw *tableWriter) writeMetadata(ctx context.Context, metadata *TableMetadat
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(metadata); err != nil {
 		return fmt.Errorf("encoding metadata: %w", err)
+	}
+
+	return nil
+}
+
+func (tw *tableWriter) writeSnapshot(ctx context.Context, snapshot *Snapshot, snapshotPath string) error {
+	file, err := os.Create(snapshotPath)
+	if err != nil {
+		return fmt.Errorf("creating snapshot file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(snapshot); err != nil {
+		return fmt.Errorf("encoding snapshot: %w", err)
+	}
+
+	return nil
+}
+
+func (tw *tableWriter) writeManifestList(ctx context.Context, manifestPaths []string, manifestListPath string) error {
+	file, err := os.Create(manifestListPath)
+	if err != nil {
+		return fmt.Errorf("creating manifest list file: %w", err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(manifestPaths); err != nil {
+		return fmt.Errorf("encoding manifest list: %w", err)
+	}
+
+	return nil
+}
+
+func (tw *tableWriter) Close(ctx context.Context) error {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+
+	if tw.writer == nil {
+		return nil
+	}
+
+	// Close Parquet writer
+	if err := tw.writer.Close(); err != nil {
+		return fmt.Errorf("closing parquet writer: %w", err)
+	}
+
+	// Close file
+	if err := tw.file.Close(); err != nil {
+		return fmt.Errorf("closing file: %w", err)
+	}
+
+	// Get file info for manifest
+	fullDataPath := filepath.Join(tw.metadata.Location, tw.path)
+	fileInfo, err := os.Stat(fullDataPath)
+	if err != nil {
+		return fmt.Errorf("getting file info: %w", err)
+	}
+
+	// Create manifest entry with proper file path
+	// The file path should be relative to the table location
+	relativeDataPath := tw.path
+	entry := ManifestEntry{
+		Status:     1, // Added
+		SnapshotID: time.Now().UnixNano() / int64(time.Millisecond),
+		SequenceNum: 1,
+		FileSequence: 1,
+		DataFile: DataFile{
+			FilePath:      relativeDataPath, // Relative path from table root
+			FileFormat:    "PARQUET",
+			Partition:     make(map[string]string), // No partitioning for now
+			RecordCount:   tw.records,
+			FileSizeBytes: fileInfo.Size(),
+			Metrics:       tw.collectMetrics(),
+		},
+	}
+
+	tw.manifests = append(tw.manifests, entry)
+
+	// Write manifest file
+	manifestPath := fmt.Sprintf("manifests/manifest_%d.json", entry.SnapshotID)
+	if err := tw.writeManifest(ctx, manifestPath); err != nil {
+		return fmt.Errorf("writing manifest: %w", err)
+	}
+
+	// Create snapshot
+	snapshot := &Snapshot{
+		SnapshotID:        entry.SnapshotID,
+		ParentSnapshotID:  0, // First snapshot
+		SequenceNumber:    1,
+		TimestampMs:       entry.SnapshotID,
+		ManifestList:      manifestPath,
+		Summary: map[string]string{
+			"added-data-files": "1",
+			"total-data-files": fmt.Sprintf("%d", len(tw.manifests)),
+			"total-records":    fmt.Sprintf("%d", tw.records),
+		},
+	}
+
+	// Update metadata
+	tw.metadata.CurrentSnapshot = snapshot
+	tw.metadata.Snapshots = append(tw.metadata.Snapshots, snapshot)
+	tw.metadata.LastUpdated = time.Now().UnixNano() / int64(time.Millisecond)
+
+	// Write updated metadata
+	metadataPath := filepath.Join(tw.metadata.Location, "metadata", "metadata.json")
+	if err := tw.writeMetadata(ctx, tw.metadata, metadataPath); err != nil {
+		return fmt.Errorf("writing metadata: %w", err)
+	}
+
+	// Write snapshot metadata
+	snapshotPath := filepath.Join(tw.metadata.Location, "metadata", fmt.Sprintf("snapshot-%d.json", snapshot.SnapshotID))
+	if err := tw.writeSnapshot(ctx, snapshot, snapshotPath); err != nil {
+		return fmt.Errorf("writing snapshot: %w", err)
+	}
+
+	// Write manifest list
+	manifestListPath := filepath.Join(tw.metadata.Location, "metadata", fmt.Sprintf("manifest-list-%d.json", snapshot.SnapshotID))
+	if err := tw.writeManifestList(ctx, []string{manifestPath}, manifestListPath); err != nil {
+		return fmt.Errorf("writing manifest list: %w", err)
 	}
 
 	return nil
