@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: arctic-mirror-postgres
+    environment:
+      POSTGRES_DB: mydb
+      POSTGRES_USER: replicator
+      POSTGRES_PASSWORD: secret
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replicator -d mydb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  arctic-mirror:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arctic-mirror-main
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5433:5433"  # Proxy port
+      - "8080:8080"  # Health check port
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+      - warehouse_data:/data/warehouse
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=replicator
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=mydb
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  arctic-compactor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arctic-mirror-compactor
+    depends_on:
+      arctic-mirror:
+        condition: service_healthy
+    volumes:
+      - ./config.yaml:/app/config/config.yaml:ro
+      - warehouse_data:/data/warehouse
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=replicator
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=mydb
+    command: ["/app/arctic-compactor", "-config", "/app/config/config.yaml", "-interval", "1h", "-parallelism", "4"]
+    restart: unless-stopped
+
+  test-client:
+    image: postgres:15-alpine
+    container_name: arctic-mirror-test-client
+    depends_on:
+      arctic-mirror:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: secret
+    command: >
+      sh -c "
+        echo 'Waiting for Arctic Mirror to be ready...' &&
+        until pg_isready -h arctic-mirror -p 5433 -U replicator; do
+          sleep 2;
+        done &&
+        echo 'Testing connection to Arctic Mirror proxy...' &&
+        psql -h arctic-mirror -p 5433 -U replicator -d mydb -c 'SELECT version();' &&
+        echo 'Connection test successful!'
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+    driver: local
+  warehouse_data:
+    driver: local
+
+networks:
+  default:
+    name: arctic-mirror-network

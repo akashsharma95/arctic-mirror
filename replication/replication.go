@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"arctic-mirror/config"
@@ -80,6 +81,13 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 }
 
 func (r *Replicator) Start(ctx context.Context) error {
+	if r.dbConn == nil {
+		return fmt.Errorf("database connection not initialized")
+	}
+	if r.replicationConn == nil {
+		return fmt.Errorf("replication connection not initialized")
+	}
+
 	defer r.dbConn.Close(context.Background())
 	defer r.replicationConn.Close(context.Background())
 
@@ -93,6 +101,10 @@ func (r *Replicator) Start(ctx context.Context) error {
 }
 
 func (r *Replicator) createReplicationSlot(ctx context.Context) error {
+	if r.replicationConn == nil {
+		return fmt.Errorf("replication connection not initialized")
+	}
+
 	_, err := pglogrepl.CreateReplicationSlot(ctx, r.replicationConn, r.config.Postgres.Slot, "pgoutput", pglogrepl.CreateReplicationSlotOptions{
 		Temporary: true,
 		Mode:      pglogrepl.LogicalReplication,
@@ -112,6 +124,10 @@ func (r *Replicator) createReplicationSlot(ctx context.Context) error {
 }
 
 func (r *Replicator) startReplication(ctx context.Context) error {
+	if r.replicationConn == nil {
+		return fmt.Errorf("replication connection not initialized")
+	}
+
 	// Get the current WAL position (LSN)
 	var startLSN pglogrepl.LSN = 0 // Replace with your starting LSN
 
@@ -132,6 +148,10 @@ func (r *Replicator) startReplication(ctx context.Context) error {
 }
 
 func (r *Replicator) handleReplication(ctx context.Context) error {
+	if r.replicationConn == nil {
+		return fmt.Errorf("replication connection not initialized")
+	}
+
 	clientXLogPos := pglogrepl.LSN(0) // Starting LSN; you might want to initialize this properly
 	standbyMessageTimeout := time.Second * 10
 	nextStandbyMessageDeadline := time.Now().Add(standbyMessageTimeout)
@@ -274,4 +294,37 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 			return fmt.Errorf("unknown replication message type: %c", msg.Data[0])
 		}
 	}
+}
+
+// GetDBConn returns the database connection for health checks
+func (r *Replicator) GetDBConn() *pgx.Conn {
+	return r.dbConn
+}
+
+// GetReplicationConn returns the replication connection for health checks
+func (r *Replicator) GetReplicationConn() *pgconn.PgConn {
+	return r.replicationConn
+}
+
+// Close closes all connections and cleans up resources
+func (r *Replicator) Close() error {
+	var errors []string
+	
+	if r.dbConn != nil {
+		if err := r.dbConn.Close(context.Background()); err != nil {
+			errors = append(errors, fmt.Sprintf("database connection: %v", err))
+		}
+	}
+	
+	if r.replicationConn != nil {
+		if err := r.replicationConn.Close(context.Background()); err != nil {
+			errors = append(errors, fmt.Sprintf("replication connection: %v", err))
+		}
+	}
+	
+	if len(errors) > 0 {
+		return fmt.Errorf("errors during shutdown: %s", strings.Join(errors, "; "))
+	}
+	
+	return nil
 }

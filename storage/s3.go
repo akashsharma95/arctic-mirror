@@ -27,6 +27,10 @@ func NewS3Storage(client *s3.Client, bucket, prefix string) *S3Storage {
 }
 
 func (s *S3Storage) Write(ctx context.Context, filepath string, data io.Reader) error {
+	if s.client == nil {
+		return fmt.Errorf("S3 client not initialized")
+	}
+
 	fullPath := path.Join(s.prefix, filepath)
 
 	// Convert io.Reader to []byte for PutObject
@@ -48,6 +52,10 @@ func (s *S3Storage) Write(ctx context.Context, filepath string, data io.Reader) 
 }
 
 func (s *S3Storage) Read(ctx context.Context, filepath string) (io.ReadCloser, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("S3 client not initialized")
+	}
+
 	fullPath := path.Join(s.prefix, filepath)
 
 	output, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -62,6 +70,10 @@ func (s *S3Storage) Read(ctx context.Context, filepath string) (io.ReadCloser, e
 }
 
 func (s *S3Storage) List(ctx context.Context, prefix string) ([]string, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("S3 client not initialized")
+	}
+
 	fullPrefix := path.Join(s.prefix, prefix)
 	var files []string
 
