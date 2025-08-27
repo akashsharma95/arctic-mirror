@@ -438,26 +438,45 @@ func (tw *tableWriter) writeMetadata(ctx context.Context, metadata *TableMetadat
 // Helper functions
 func postgresTypeToIceberg(pgTypeOID uint32) string {
 	switch pgTypeOID {
-	case pgtype.Int4OID, pgtype.Int8OID:
-		return "int"
+	// Integer types
 	case pgtype.Int2OID:
 		return "int"
-	case pgtype.TextOID, pgtype.VarcharOID, pgtype.BPCharOID:
-		return "string"
-	case pgtype.Float8OID:
-		return "double"
+	case pgtype.Int4OID:
+		return "int"
+	case pgtype.Int8OID:
+		return "long"
+	
+	// Floating point types
 	case pgtype.Float4OID:
 		return "float"
+	case pgtype.Float8OID:
+		return "double"
+	
+	// Character types
+	case pgtype.BPCharOID:
+		return "string"
+	case pgtype.VarcharOID:
+		return "string"
+	case pgtype.TextOID:
+		return "string"
+	
+	// Boolean type
 	case pgtype.BoolOID:
 		return "boolean"
+	
+	// Date and time types
 	case pgtype.DateOID:
 		return "date"
-	case pgtype.TimestampOID, pgtype.TimestamptzOID:
+	case pgtype.TimestampOID:
 		return "timestamp"
-	case pgtype.NumericOID:
-		return "double" // Simplify decimal to double
+	case pgtype.TimestamptzOID:
+		return "timestamptz"
+	
+	// Binary types
 	case pgtype.ByteaOID:
 		return "binary"
+	
+	// Unknown types
 	default:
 		return "string" // Default to string for unknown types
 	}
@@ -485,11 +504,14 @@ func createParquetSchema(schema SchemaV2) (*parquet.Schema, error) {
 		case "date":
 			node = parquet.Date()
 		case "timestamp":
-			node = parquet.Timestamp(parquet.Millisecond)
+			node = parquet.Timestamp(parquet.Microsecond)
+		case "timestamptz":
+			node = parquet.Timestamp(parquet.Microsecond)
 		case "binary":
 			node = parquet.Leaf(parquet.ByteArrayType)
 		default:
-			return nil, fmt.Errorf("unsupported type: %s", field.Type)
+			// Default to string for unknown types
+			node = parquet.Leaf(parquet.ByteArrayType)
 		}
 
 		if !field.Required {

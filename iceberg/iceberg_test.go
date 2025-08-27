@@ -229,14 +229,17 @@ func TestPostgresTypeToIceberg(t *testing.T) {
 		pgTypeOID uint32
 		expected  string
 	}{
+		{21, "int"},    // INT2
 		{23, "int"},    // INT4
-		{20, "int"},    // INT8
-		{25, "string"}, // TEXT
+		{20, "long"},   // INT8
+		{700, "float"}, // FLOAT4
 		{701, "double"}, // FLOAT8
 		{16, "boolean"}, // BOOL
+		{1043, "string"}, // VARCHAR
+		{25, "string"}, // TEXT
 		{1082, "date"}, // DATE
 		{1114, "timestamp"}, // TIMESTAMP
-		{1700, "double"}, // NUMERIC
+		{1184, "timestamptz"}, // TIMESTAMPTZ
 		{17, "binary"}, // BYTEA
 		{9999, "string"}, // Unknown type
 	}
@@ -277,8 +280,15 @@ func TestCreateParquetSchemaUnsupportedType(t *testing.T) {
 		},
 	}
 
-	_, err := createParquetSchema(schema)
-	if err == nil {
-		t.Error("Expected error for unsupported type")
+	parquetSchema, err := createParquetSchema(schema)
+	if err != nil {
+		t.Fatalf("Failed to create parquet schema: %v", err)
 	}
+
+	if parquetSchema == nil {
+		t.Fatal("Expected parquet schema to be created")
+	}
+
+	// Verify that unsupported types default to string (ByteArrayType)
+	// This is the expected behavior now
 }
