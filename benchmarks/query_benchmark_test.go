@@ -9,10 +9,8 @@ import (
 	"time"
 
 	"arctic-mirror/config"
-	"arctic-mirror/iceberg"
 	"arctic-mirror/proxy"
 	"arctic-mirror/replication"
-	"arctic-mirror/schema"
 
 	"github.com/jackc/pgx/v5"
 	_ "github.com/marcboeker/go-duckdb"
@@ -20,18 +18,18 @@ import (
 
 // TestSuite holds the test environment
 type QueryBenchmarkSuite struct {
-	config     *config.Config
-	postgresDB *pgx.Conn
-	proxy      *proxy.DuckDBProxy
-	replicator *replication.Replicator
-	ctx        context.Context
-	cleanup    []func()
+	config        *config.Config
+	postgresDB    *pgx.Conn
+	proxy         *proxy.DuckDBProxy
+	replicator    *replication.Replicator
+	ctx           context.Context
+	cleanupFuncs  []func()
 }
 
 // setup initializes the benchmark environment
 func (qbs *QueryBenchmarkSuite) setup(b *testing.B) error {
 	// Load test configuration
-	cfg, err := config.LoadConfig("test_config.yaml")
+	cfg, err := config.LoadConfig("../test_config.yaml")
 	if err != nil {
 		return fmt.Errorf("failed to load test config: %w", err)
 	}
@@ -69,7 +67,7 @@ func (qbs *QueryBenchmarkSuite) setup(b *testing.B) error {
 	}
 
 	// Add cleanup functions
-	qbs.cleanup = append(qbs.cleanup, func() {
+	qbs.cleanupFuncs = append(qbs.cleanupFuncs, func() {
 		qbs.postgresDB.Close(context.Background())
 		os.RemoveAll(cfg.Iceberg.Path)
 	})
@@ -79,15 +77,6 @@ func (qbs *QueryBenchmarkSuite) setup(b *testing.B) error {
 
 // initializeComponents initializes the replication and proxy components
 func (qbs *QueryBenchmarkSuite) initializeComponents(b *testing.B) error {
-	// Create schema manager
-	schemaManager := &schema.Manager{}
-
-	// Create Iceberg writer
-	writer, err := iceberg.NewWriter(qbs.config.Iceberg.Path, schemaManager)
-	if err != nil {
-		return fmt.Errorf("failed to create Iceberg writer: %w", err)
-	}
-
 	// Create replicator
 	replicator, err := replication.NewReplicator(qbs.config)
 	if err != nil {
@@ -110,6 +99,7 @@ func (qbs *QueryBenchmarkSuite) initializeComponents(b *testing.B) error {
 			b.Logf("Replication error: %v", err)
 		}
 	}()
+	defer cancel() // Ensure context is cancelled when function returns
 
 	// Start proxy in background
 	go func() {
@@ -249,7 +239,7 @@ func (qbs *QueryBenchmarkSuite) insertTestData(b *testing.B) error {
 
 // cleanup performs cleanup operations
 func (qbs *QueryBenchmarkSuite) cleanup() {
-	for _, cleanupFn := range qbs.cleanup {
+	for _, cleanupFn := range qbs.cleanupFuncs {
 		cleanupFn()
 	}
 }
