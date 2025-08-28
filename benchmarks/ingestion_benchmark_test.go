@@ -10,6 +10,7 @@ import (
 	"arctic-mirror/iceberg"
 	"arctic-mirror/schema"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pglogrepl"
 )
 
 // BenchmarkData represents benchmark data structure
@@ -72,19 +73,46 @@ func BenchmarkIcebergWriterIngestion(b *testing.B) {
 
 	// Run benchmark
 	for i := 0; i < b.N; i++ {
-		// For this benchmark, we'll just test the writer creation and basic operations
-		// since the actual ingestion requires PostgreSQL replication messages
-		
-		// Test writer creation
-		if writer == nil {
-			b.Fatal("Writer should not be nil")
+		// Create a mock relation message for testing
+		relationID := uint32(i + 1)
+		rel := &pglogrepl.RelationMessageV2{
+			RelationID:   relationID,
+			RelationName: fmt.Sprintf("benchmark_table_%d", i),
+			ReplicaIdentity: pglogrepl.ReplicaIdentityDefault,
+			Columns: []pglogrepl.Column{
+				{Name: "id", DataType: pgtype.Int8OID, Flags: 1},
+				{Name: "name", DataType: pgtype.TextOID, Flags: 0},
+				{Name: "value", DataType: pgtype.Float8OID, Flags: 0},
+				{Name: "timestamp", DataType: pgtype.TimestamptzOID, Flags: 0},
+			},
 		}
-		
-		// Test basic operations (this is a simplified benchmark)
-		_ = writer.Commit()
-		
-		// Simulate some data processing
-		_ = len(testData)
+
+		// Write test data as insert messages
+		for _, data := range testData {
+			// Create a mock insert message
+			insertMsg := &pglogrepl.InsertMessageV2{
+				RelationID: relationID,
+				Tuple: &pglogrepl.TupleData{
+					ColumnCount: 4,
+					Columns: []pglogrepl.TupleDataColumn{
+						{DataType: pglogrepl.TupleDataColumnValue, Length: 8, Data: []byte{byte(data.ID), 0, 0, 0, 0, 0, 0, 0}},
+						{DataType: pglogrepl.TupleDataColumnValue, Length: uint16(len(data.Name)), Data: []byte(data.Name)},
+						{DataType: pglogrepl.TupleDataColumnValue, Length: 8, Data: []byte{0, 0, 0, 0, 0, 0, 0, 0}}, // value
+						{DataType: pglogrepl.TupleDataColumnValue, Length: 8, Data: []byte{0, 0, 0, 0, 0, 0, 0, 0}}, // timestamp
+					},
+				},
+			}
+
+			if err := writer.WriteInsert(insertMsg, rel); err != nil {
+				b.Errorf("Failed to write insert: %v", err)
+				continue
+			}
+		}
+
+		// Commit the data
+		if err := writer.Commit(); err != nil {
+			b.Errorf("Failed to commit: %v", err)
+		}
 	}
 }
 
@@ -183,6 +211,9 @@ func BenchmarkConcurrentWriters(b *testing.B) {
 		b.Fatalf("Failed to create writer: %v", err)
 	}
 
+	// Generate test data
+	testData := generateBenchmarkData(100)
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Test concurrent writer operations
@@ -194,16 +225,39 @@ func BenchmarkConcurrentWriters(b *testing.B) {
 			go func(writerIndex int) {
 				defer wg.Done()
 
-				// Test basic writer operations
-				if writer == nil {
-					errors <- fmt.Errorf("writer %d is nil", writerIndex)
-					return
+				// Create a mock relation message for this worker
+				relationID := uint32(i*3 + writerIndex + 1)
+				rel := &pglogrepl.RelationMessageV2{
+					RelationID:   relationID,
+					RelationName: fmt.Sprintf("concurrent_table_%d_%d", i, writerIndex),
+					ReplicaIdentity: pglogrepl.ReplicaIdentityDefault,
+					Columns: []pglogrepl.Column{
+						{Name: "id", DataType: pgtype.Int8OID, Flags: 1},
+						{Name: "name", DataType: pgtype.TextOID, Flags: 0},
+						{Name: "value", DataType: pgtype.Float8OID, Flags: 0},
+					},
 				}
 
-				// Test commit operation
-				if err := writer.Commit(); err != nil {
-					errors <- fmt.Errorf("writer %d commit failed: %w", writerIndex, err)
-					return
+				// Write some test data
+				for k, data := range testData {
+					if k%3 == writerIndex { // Distribute data across workers
+						insertMsg := &pglogrepl.InsertMessageV2{
+							RelationID: relationID,
+							Tuple: &pglogrepl.TupleData{
+								ColumnCount: 3,
+								Columns: []pglogrepl.TupleDataColumn{
+									{DataType: pglogrepl.TupleDataColumnValue, Length: 8, Data: []byte{byte(data.ID), 0, 0, 0, 0, 0, 0, 0}},
+									{DataType: pglogrepl.TupleDataColumnValue, Length: uint16(len(data.Name)), Data: []byte(data.Name)},
+									{DataType: pglogrepl.TupleDataColumnValue, Length: 8, Data: []byte{0, 0, 0, 0, 0, 0, 0, 0}},
+								},
+							},
+						}
+
+						if err := writer.WriteInsert(insertMsg, rel); err != nil {
+							errors <- fmt.Errorf("worker %d write failed: %w", writerIndex, err)
+							return
+						}
+					}
 				}
 			}(j)
 		}
@@ -215,8 +269,13 @@ func BenchmarkConcurrentWriters(b *testing.B) {
 		// Check for errors
 		for err := range errors {
 			if err != nil {
-				b.Fatalf("Concurrent writer error: %v", err)
+				b.Errorf("Concurrent writer error: %v", err)
 			}
+		}
+
+		// Commit all changes
+		if err := writer.Commit(); err != nil {
+			b.Errorf("Failed to commit concurrent writes: %v", err)
 		}
 	}
 }
