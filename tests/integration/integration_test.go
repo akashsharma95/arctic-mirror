@@ -118,7 +118,7 @@ func (ts *IntegrationTestSuite) setupIntegrationTest(t *testing.T) error {
 		return fmt.Errorf("failed to create Iceberg writer: %w", err)
 	}
 
-	// Add cleanup functions
+			// Add cleanup functions
 	ts.cleanupFuncs = append(ts.cleanupFuncs, func() {
 		if ts.postgresDB != nil {
 			ts.postgresDB.Close(ctx)
@@ -127,7 +127,7 @@ func (ts *IntegrationTestSuite) setupIntegrationTest(t *testing.T) error {
 			ts.postgresContainer.Terminate(ctx)
 		}
 		if ts.duckDBProxy != nil {
-			ts.duckDBProxy.Stop()
+			ts.duckDBProxy.Close()
 		}
 	})
 
