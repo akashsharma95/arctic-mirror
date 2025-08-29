@@ -14,30 +14,30 @@ import (
 
 // MockDatabase simulates a real database for benchmarking
 type MockDatabase struct {
-	users    []map[string]interface{}
-	products []map[string]interface{}
-	orders   []map[string]interface{}
+	users      []map[string]interface{}
+	products   []map[string]interface{}
+	orders     []map[string]interface{}
 	categories []map[string]interface{}
 }
 
 // NewMockDatabase creates a new mock database with realistic data
 func NewMockDatabase() *MockDatabase {
 	db := &MockDatabase{}
-	
+
 	// Generate users
 	db.users = make([]map[string]interface{}, 10000)
 	for i := 0; i < 10000; i++ {
 		db.users[i] = map[string]interface{}{
-			"id":        i + 1,
-			"username":  fmt.Sprintf("user%d", i),
-			"email":     fmt.Sprintf("user%d@example.com", i),
-			"age":       18 + (i % 62),
-			"country":   []string{"USA", "Canada", "UK", "Germany", "France", "Japan", "Australia", "Brazil", "India", "China"}[i%10],
-			"is_active": i%10 != 0,
+			"id":         i + 1,
+			"username":   fmt.Sprintf("user%d", i),
+			"email":      fmt.Sprintf("user%d@example.com", i),
+			"age":        18 + (i % 62),
+			"country":    []string{"USA", "Canada", "UK", "Germany", "France", "Japan", "Australia", "Brazil", "India", "China"}[i%10],
+			"is_active":  i%10 != 0,
 			"created_at": time.Now().Add(-time.Duration(i*24) * time.Hour),
 		}
 	}
-	
+
 	// Generate categories
 	db.categories = make([]map[string]interface{}, 50)
 	for i := 0; i < 50; i++ {
@@ -48,7 +48,7 @@ func NewMockDatabase() *MockDatabase {
 			"is_active":   i%20 != 0,
 		}
 	}
-	
+
 	// Generate products
 	db.products = make([]map[string]interface{}, 5000)
 	for i := 0; i < 5000; i++ {
@@ -59,11 +59,11 @@ func NewMockDatabase() *MockDatabase {
 			"price":          float64(10+(i%990)) + float64(i%100)/100,
 			"stock_quantity": 100 + (i % 900),
 			"category_id":    (i % 50) + 1,
-			"is_available":  i%20 != 0,
-			"created_at":    time.Now().Add(-time.Duration(i*12) * time.Hour),
+			"is_available":   i%20 != 0,
+			"created_at":     time.Now().Add(-time.Duration(i*12) * time.Hour),
 		}
 	}
-	
+
 	// Generate orders
 	db.orders = make([]map[string]interface{}, 50000)
 	for i := 0; i < 50000; i++ {
@@ -77,7 +77,7 @@ func NewMockDatabase() *MockDatabase {
 			"order_date":   time.Now().Add(-time.Duration(i*2) * time.Hour),
 		}
 	}
-	
+
 	return db
 }
 
@@ -113,7 +113,7 @@ func (db *MockDatabase) executeComplexQuery(query string) ([]map[string]interfac
 	if len(query) > 100 {
 		// Simulate complex query processing time
 		time.Sleep(100 * time.Microsecond)
-		
+
 		// Return mock joined data
 		result := make([]map[string]interface{}, 100)
 		for i := 0; i < 100; i++ {
@@ -127,7 +127,7 @@ func (db *MockDatabase) executeComplexQuery(query string) ([]map[string]interfac
 		}
 		return result, nil
 	}
-	
+
 	return []map[string]interface{}{}, nil
 }
 
@@ -175,13 +175,13 @@ func (qbs *QueryBenchmarkSuite) setup(b *testing.B) error {
 func (qbs *QueryBenchmarkSuite) initializeComponents(b *testing.B) error {
 	// For benchmarking purposes, we'll skip real replication and proxy setup
 	// since we're using a mock database
-	
+
 	// Create a simple context for the benchmarks
 	qbs.ctx = context.Background()
-	
+
 	// Log that we're using mock components
 	b.Logf("Using mock database for benchmarking - no real replication or proxy required")
-	
+
 	return nil
 }
 
@@ -502,7 +502,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// Execute 4 queries concurrently
 		results := make(chan error, 4)
-		
+
 		for j := 0; j < 4; j++ {
 			go func(workerID int) {
 				query := queries[(i+workerID)%len(queries)]
@@ -568,7 +568,7 @@ func BenchmarkMockQueryPerformance(b *testing.B) {
 	// Generate mock data
 	users := make([]map[string]interface{}, 1000)
 	orders := make([]map[string]interface{}, 10000)
-	
+
 	for i := 0; i < 1000; i++ {
 		users[i] = map[string]interface{}{
 			"id":        i + 1,
@@ -578,7 +578,7 @@ func BenchmarkMockQueryPerformance(b *testing.B) {
 			"is_active": i%10 != 0,
 		}
 	}
-	
+
 	for i := 0; i < 10000; i++ {
 		orders[i] = map[string]interface{}{
 			"id":           i + 1,
@@ -601,7 +601,7 @@ func BenchmarkMockQueryPerformance(b *testing.B) {
 				}
 			}
 			_ = count
-			
+
 		case 1:
 			// Simulate JOIN query
 			totalRevenue := 0.0
@@ -611,7 +611,7 @@ func BenchmarkMockQueryPerformance(b *testing.B) {
 				}
 			}
 			_ = totalRevenue
-			
+
 		case 2:
 			// Simulate GROUP BY query
 			countryStats := make(map[string]int)
@@ -620,7 +620,7 @@ func BenchmarkMockQueryPerformance(b *testing.B) {
 				countryStats[country]++
 			}
 			_ = countryStats
-			
+
 		case 3:
 			// Simulate complex filtering
 			highValueOrders := 0
