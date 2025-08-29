@@ -51,6 +51,7 @@ type Manager struct {
 	mu           sync.RWMutex
 	httpServer   *http.Server
 	checkResults map[string]Component
+	customHandlers map[string]http.Handler
 }
 
 // NewManager creates a new health manager
@@ -60,6 +61,7 @@ func NewManager(cfg *config.Config) *Manager {
 		checkers:     make(map[string]HealthChecker),
 		startTime:    time.Now(),
 		checkResults: make(map[string]Component),
+		customHandlers: make(map[string]http.Handler),
 	}
 }
 
@@ -68,6 +70,14 @@ func (m *Manager) RegisterChecker(name string, checker HealthChecker) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.checkers[name] = checker
+}
+
+// AddHandler registers a custom HTTP handler to the health server's mux.
+// Should be called before StartHTTPServer to ensure early registration.
+func (m *Manager) AddHandler(path string, handler http.Handler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.customHandlers[path] = handler
 }
 
 // RunHealthChecks runs all registered health checks
@@ -159,6 +169,13 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 	
 	// Metrics endpoint (Prometheus)
 	mux.Handle("/metrics", promhttp.Handler())
+
+	// Custom admin handlers
+	m.mu.RLock()
+	for path, handler := range m.customHandlers {
+		mux.Handle(path, handler)
+	}
+	m.mu.RUnlock()
 	
 	m.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

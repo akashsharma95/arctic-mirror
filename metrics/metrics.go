@@ -62,6 +62,62 @@ var (
             Buckets:   prometheus.DefBuckets,
         },
     )
+
+    // Compaction metrics
+    CompactionRunsTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "runs_total",
+            Help:      "Total number of compaction runs.",
+        },
+    )
+
+    CompactionDurationSeconds = prometheus.NewHistogram(
+        prometheus.HistogramOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "duration_seconds",
+            Help:      "Duration of compaction runs in seconds.",
+            Buckets:   prometheus.DefBuckets,
+        },
+    )
+
+    CompactionFilesProcessedTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "files_processed_total",
+            Help:      "Total number of files processed by compaction.",
+        },
+    )
+
+    CompactionFilesCompactedTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "files_compacted_total",
+            Help:      "Total number of files compacted.",
+        },
+    )
+
+    CompactionBytesSavedTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "bytes_saved_total",
+            Help:      "Total number of bytes saved by compaction.",
+        },
+    )
+
+    CompactionErrorsTotal = prometheus.NewCounter(
+        prometheus.CounterOpts{
+            Namespace: "arctic_mirror",
+            Subsystem: "compaction",
+            Name:      "errors_total",
+            Help:      "Total number of compaction errors.",
+        },
+    )
 )
 
 // Init registers all application metrics with the default Prometheus registry.
@@ -73,6 +129,12 @@ func Init() {
         ReplicationLastLSN,
         ProxyQueriesTotal,
         ProxyQueryDurationSeconds,
+        CompactionRunsTotal,
+        CompactionDurationSeconds,
+        CompactionFilesProcessedTotal,
+        CompactionFilesCompactedTotal,
+        CompactionBytesSavedTotal,
+        CompactionErrorsTotal,
     )
 }
 
