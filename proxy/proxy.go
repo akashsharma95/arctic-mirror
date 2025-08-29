@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+    "time"
 
 	"arctic-mirror/config"
+    "arctic-mirror/metrics"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	_ "github.com/marcboeker/go-duckdb"
@@ -98,13 +100,42 @@ func (p *DuckDBProxy) handleConnection(ctx context.Context, conn net.Conn) {
 	backend := pgproto3.NewBackend(conn, conn)
 
 	// Handle startup
-	_, err := backend.ReceiveStartupMessage()
+	sm, err := backend.ReceiveStartupMessage()
 	if err != nil {
 		return
 	}
 
-	// Send authentication OK
-	backend.Send(&pgproto3.AuthenticationOk{})
+	// Optional cleartext auth based on config
+	if p.config.Proxy.AuthUser != "" {
+		switch msg := sm.(type) {
+		case *pgproto3.StartupMessage:
+			// Expect user from params
+			user := msg.Parameters["user"]
+			if user != p.config.Proxy.AuthUser {
+				p.sendError(backend, fmt.Errorf("invalid user"))
+				return
+			}
+		}
+		// Request cleartext password
+		backend.Send(&pgproto3.AuthenticationCleartextPassword{})
+		if err := backend.Flush(); err != nil {
+			return
+		}
+		// Receive password message
+		msg, err := backend.Receive()
+		if err != nil {
+			return
+		}
+		pwdMsg, ok := msg.(*pgproto3.PasswordMessage)
+		if !ok || string(pwdMsg.Password) != p.config.Proxy.AuthPassword {
+			p.sendError(backend, fmt.Errorf("authentication failed"))
+			return
+		}
+		backend.Send(&pgproto3.AuthenticationOk{})
+	} else {
+		// No auth configured
+		backend.Send(&pgproto3.AuthenticationOk{})
+	}
 	backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	if err := backend.Flush(); err != nil {
 		return
@@ -131,12 +162,21 @@ func (p *DuckDBProxy) handleConnection(ctx context.Context, conn net.Conn) {
 }
 
 func (p *DuckDBProxy) handleQuery(ctx context.Context, backend *pgproto3.Backend, query string) error {
+	start := time.Now()
 	// Execute query using DuckDB
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+
+    // Metrics and slow query logging
+    duration := time.Since(start)
+    metrics.ProxyQueriesTotal.Inc()
+    metrics.ProxyQueryDurationSeconds.Observe(duration.Seconds())
+    if p.config.Proxy.SlowQueryMillis > 0 && duration.Milliseconds() >= int64(p.config.Proxy.SlowQueryMillis) {
+        log.Printf("slow query: duration=%dms sql=%q", duration.Milliseconds(), query)
+    }
 
 	// Get column descriptions
 	columnTypes, err := rows.ColumnTypes()

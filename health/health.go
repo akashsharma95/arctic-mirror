@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"arctic-mirror/config"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Status represents the health status of a component
@@ -156,26 +157,8 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 			health.Status, health.Timestamp.Format(time.RFC3339), health.Uptime, len(health.Components))
 	})
 	
-	// Metrics endpoint
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		
-		// Basic metrics in Prometheus format
-		fmt.Fprintf(w, "# HELP arctic_mirror_uptime_seconds System uptime in seconds\n")
-		fmt.Fprintf(w, "# TYPE arctic_mirror_uptime_seconds gauge\n")
-		fmt.Fprintf(w, "arctic_mirror_uptime_seconds %f\n", time.Since(m.startTime).Seconds())
-		
-		// Component health metrics
-		health := m.RunHealthChecks(ctx)
-		for _, component := range health.Components {
-			status := 0
-			if component.Status == StatusHealthy {
-				status = 1
-			}
-			fmt.Fprintf(w, "arctic_mirror_component_health{name=\"%s\"} %d\n", component.Name, status)
-		}
-	})
+	// Metrics endpoint (Prometheus)
+	mux.Handle("/metrics", promhttp.Handler())
 	
 	m.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

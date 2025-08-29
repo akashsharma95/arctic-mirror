@@ -29,7 +29,10 @@ type Config struct {
 	} `yaml:"iceberg"`
 
 	Proxy struct {
-		Port int `yaml:"port"`
+		Port            int    `yaml:"port"`
+		AuthUser        string `yaml:"auth_user"`
+		AuthPassword    string `yaml:"auth_password"`
+		SlowQueryMillis int    `yaml:"slow_query_millis"`
 	} `yaml:"proxy"`
 }
 
@@ -81,6 +84,9 @@ func (c *Config) Validate() error {
 	// Validate Proxy configuration
 	if c.Proxy.Port <= 0 || c.Proxy.Port > 65535 {
 		errors = append(errors, "proxy.port must be between 1 and 65535")
+	}
+	if c.Proxy.SlowQueryMillis < 0 {
+		errors = append(errors, "proxy.slow_query_millis must be >= 0")
 	}
 
 	if len(errors) > 0 {

@@ -11,6 +11,7 @@ import (
 
 	"arctic-mirror/config"
 	"arctic-mirror/health"
+	"arctic-mirror/metrics"
 	"arctic-mirror/proxy"
 	"arctic-mirror/replication"
 )
@@ -31,6 +32,9 @@ func main() {
 	log.Printf("Iceberg path: %s", cfg.Iceberg.Path)
 	log.Printf("Proxy port: %d", cfg.Proxy.Port)
 	log.Printf("Health port: %d", *healthPort)
+
+	// Initialize metrics registry
+	metrics.Init()
 
 	// Initialize health monitoring
 	healthManager := health.NewManager(cfg)

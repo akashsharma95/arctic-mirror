@@ -92,6 +92,9 @@ func TestConfigValidation(t *testing.T) {
 	cfg.Postgres.Publication = "pub_all"
 	cfg.Iceberg.Path = "/tmp/warehouse"
 	cfg.Proxy.Port = 5433
+	cfg.Proxy.SlowQueryMillis = 0
+	cfg.Proxy.AuthUser = ""
+	cfg.Proxy.AuthPassword = ""
 	cfg.Tables = []struct {
 		Schema string `yaml:"schema"`
 		Name   string `yaml:"name"`
