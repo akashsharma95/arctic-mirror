@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"arctic-mirror/config"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Status represents the health status of a component
@@ -50,6 +51,7 @@ type Manager struct {
 	mu           sync.RWMutex
 	httpServer   *http.Server
 	checkResults map[string]Component
+	customHandlers map[string]http.Handler
 }
 
 // NewManager creates a new health manager
@@ -59,6 +61,7 @@ func NewManager(cfg *config.Config) *Manager {
 		checkers:     make(map[string]HealthChecker),
 		startTime:    time.Now(),
 		checkResults: make(map[string]Component),
+		customHandlers: make(map[string]http.Handler),
 	}
 }
 
@@ -67,6 +70,14 @@ func (m *Manager) RegisterChecker(name string, checker HealthChecker) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.checkers[name] = checker
+}
+
+// AddHandler registers a custom HTTP handler to the health server's mux.
+// Should be called before StartHTTPServer to ensure early registration.
+func (m *Manager) AddHandler(path string, handler http.Handler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.customHandlers[path] = handler
 }
 
 // RunHealthChecks runs all registered health checks
@@ -156,26 +167,15 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 			health.Status, health.Timestamp.Format(time.RFC3339), health.Uptime, len(health.Components))
 	})
 	
-	// Metrics endpoint
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		
-		// Basic metrics in Prometheus format
-		fmt.Fprintf(w, "# HELP arctic_mirror_uptime_seconds System uptime in seconds\n")
-		fmt.Fprintf(w, "# TYPE arctic_mirror_uptime_seconds gauge\n")
-		fmt.Fprintf(w, "arctic_mirror_uptime_seconds %f\n", time.Since(m.startTime).Seconds())
-		
-		// Component health metrics
-		health := m.RunHealthChecks(ctx)
-		for _, component := range health.Components {
-			status := 0
-			if component.Status == StatusHealthy {
-				status = 1
-			}
-			fmt.Fprintf(w, "arctic_mirror_component_health{name=\"%s\"} %d\n", component.Name, status)
-		}
-	})
+	// Metrics endpoint (Prometheus)
+	mux.Handle("/metrics", promhttp.Handler())
+
+	// Custom admin handlers
+	m.mu.RLock()
+	for path, handler := range m.customHandlers {
+		mux.Handle(path, handler)
+	}
+	m.mu.RUnlock()
 	
 	m.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),

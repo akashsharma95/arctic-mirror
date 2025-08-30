@@ -9,10 +9,14 @@ import (
 	"syscall"
 	"time"
 
+	"arctic-mirror/compaction"
 	"arctic-mirror/config"
 	"arctic-mirror/health"
+	"arctic-mirror/metrics"
 	"arctic-mirror/proxy"
 	"arctic-mirror/replication"
+	"encoding/json"
+	"net/http"
 )
 
 func main() {
@@ -32,10 +36,54 @@ func main() {
 	log.Printf("Proxy port: %d", cfg.Proxy.Port)
 	log.Printf("Health port: %d", *healthPort)
 
+	// Initialize metrics registry
+	metrics.Init()
+
 	// Initialize health monitoring
 	healthManager := health.NewManager(cfg)
-	
-	// Start health check server
+
+	// Initialize compactor if enabled and register admin endpoint
+	var compactor *compaction.Compactor
+	if cfg.Compaction.Enabled {
+		parallelism := cfg.Compaction.Parallelism
+		if parallelism <= 0 {
+			parallelism = 4
+		}
+		c, err := compaction.NewCompactor(cfg.Iceberg.Path, parallelism)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize compactor: %v", err)
+		} else {
+			compactor = c
+			// Admin endpoint to trigger compaction
+			healthManager.AddHandler("/admin/compact", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := r.Context()
+				start := time.Now()
+				stats, err := compactor.Compact(ctx)
+				if err != nil {
+					metrics.CompactionErrorsTotal.Inc()
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+					return
+				}
+				// Metrics
+				dur := time.Since(start)
+				metrics.CompactionRunsTotal.Inc()
+				metrics.CompactionDurationSeconds.Observe(dur.Seconds())
+				metrics.CompactionFilesProcessedTotal.Add(float64(stats.FilesProcessed))
+				metrics.CompactionFilesCompactedTotal.Add(float64(stats.FilesCompacted))
+				metrics.CompactionBytesSavedTotal.Add(float64(stats.BytesSaved))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"files_processed": stats.FilesProcessed,
+					"files_compacted": stats.FilesCompacted,
+					"bytes_saved":     stats.BytesSaved,
+					"duration_ms":     dur.Milliseconds(),
+				})
+			}))
+		}
+	}
+
+	// Start health check server (registers admin endpoints above)
 	if err := healthManager.StartHTTPServer(context.Background(), *healthPort); err != nil {
 		log.Printf("Warning: Failed to start health server: %v", err)
 	} else {
@@ -84,6 +132,41 @@ func main() {
 			cancel()
 		}
 	}()
+
+	// Start background compaction scheduler if enabled
+	if compactor != nil {
+		interval := time.Duration(cfg.Compaction.IntervalSeconds) * time.Second
+		if interval <= 0 {
+			interval = time.Hour
+		}
+		go func() {
+			log.Printf("Starting compaction scheduler with interval %v", interval)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					start := time.Now()
+					stats, err := compactor.Compact(ctx)
+					if err != nil {
+						metrics.CompactionErrorsTotal.Inc()
+						log.Printf("Compaction error: %v", err)
+						continue
+					}
+					dur := time.Since(start)
+					metrics.CompactionRunsTotal.Inc()
+					metrics.CompactionDurationSeconds.Observe(dur.Seconds())
+					metrics.CompactionFilesProcessedTotal.Add(float64(stats.FilesProcessed))
+					metrics.CompactionFilesCompactedTotal.Add(float64(stats.FilesCompacted))
+					metrics.CompactionBytesSavedTotal.Add(float64(stats.BytesSaved))
+					log.Printf("Compaction completed: files_processed=%d files_compacted=%d bytes_saved=%d duration=%s",
+						stats.FilesProcessed, stats.FilesCompacted, stats.BytesSaved, dur.String())
+				}
+			}
+		}()
+	}
 
 	// Wait a moment for connections to be established, then register database health checkers
 	go func() {
@@ -150,6 +233,12 @@ func main() {
 		log.Printf("Warning: Error closing proxy: %v", err)
 	}
 	
+	if compactor != nil {
+		if err := compactor.Stop(shutdownCtx); err != nil {
+			log.Printf("Warning: Error stopping compactor: %v", err)
+		}
+	}
+
 	if err := replicator.Close(); err != nil {
 		log.Printf("Warning: Error closing replicator: %v", err)
 	}

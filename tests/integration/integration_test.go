@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -260,6 +261,10 @@ func TestEndToEndIntegration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
+	// Skip if Docker is not available in this environment
+	if os.Getenv("DOCKER_HOST") == "" {
+		t.Skip("Skipping integration test: DOCKER_HOST not set")
+	}
 
 	ts := &IntegrationTestSuite{}
 	err := ts.setupIntegrationTest(t)
@@ -382,6 +387,9 @@ func TestPerformanceBenchmarks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping performance test in short mode")
 	}
+	if os.Getenv("DOCKER_HOST") == "" {
+		t.Skip("Skipping performance benchmark: DOCKER_HOST not set")
+	}
 
 	ts := &IntegrationTestSuite{}
 	err := ts.setupIntegrationTest(t)
@@ -457,6 +465,9 @@ func TestPerformanceBenchmarks(t *testing.T) {
 func TestDataConsistency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping consistency test in short mode")
+	}
+	if os.Getenv("DOCKER_HOST") == "" {
+		t.Skip("Skipping data consistency test: DOCKER_HOST not set")
 	}
 
 	ts := &IntegrationTestSuite{}
