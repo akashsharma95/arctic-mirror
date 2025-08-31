@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
 
 	"arctic-mirror/config"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 func TestNewDuckDBProxy(t *testing.T) {
@@ -173,6 +175,96 @@ func TestDataTypeMapping(t *testing.T) {
 		result := mapDataTypeToOID(tc.input)
 		if result != tc.expected {
 			t.Errorf("For input '%s', expected %d, got %d", tc.input, tc.expected, result)
+		}
+	}
+}
+
+func TestSSLRequestIsHandled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Proxy.Port = 5440
+	p, err := NewDuckDBProxy(cfg)
+	if err != nil {
+		t.Fatalf("proxy new: %v", err)
+	}
+	defer p.listener.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go p.Start(ctx)
+
+	// Connect raw TCP
+	conn, err := net.DialTimeout("tcp", p.listener.Addr().String(), 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Send SSLRequest packet: Int32 len=8, Int32 code=80877103
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint32(buf[0:], 8)
+	binary.BigEndian.PutUint32(buf[4:], 80877103)
+	if _, err := conn.Write(buf); err != nil {
+		t.Fatalf("write sslreq: %v", err)
+	}
+	// Expect single byte 'N'
+	one := make([]byte, 1)
+	if _, err := conn.Read(one); err != nil {
+		t.Fatalf("read ssl resp: %v", err)
+	}
+	if one[0] != 'N' {
+		t.Fatalf("expected 'N' for no SSL, got %q", one[0])
+	}
+}
+
+func TestExtendedQueryFlowParseBindDescribeExecute(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Proxy.Port = 5441
+	p, err := NewDuckDBProxy(cfg)
+	if err != nil {
+		t.Fatalf("proxy new: %v", err)
+	}
+	defer p.listener.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	go p.Start(ctx)
+
+	// Establish a simple PG connection using pgproto3 Frontend
+	conn, err := net.DialTimeout("tcp", p.listener.Addr().String(), 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	fe := pgproto3.NewFrontend(conn, conn)
+	fe.Send(&pgproto3.StartupMessage{ProtocolVersion: 196608, Parameters: map[string]string{"user":"u","database":"d"}})
+	// Read until ReadyForQuery or timeout
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		msg, _ := fe.Receive()
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	// Parse a statement with one parameter
+	fe.Send(&pgproto3.Parse{Name: "s1", Query: "SELECT ?", ParameterOIDs: []uint32{25}})
+	// Bind portal with one param
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p1", PreparedStatement: "s1", Parameters: [][]byte{[]byte("1")}})
+	// Describe portal
+	fe.Send(&pgproto3.Describe{ObjectType: 'P', Name: "p1"})
+	// Execute
+	fe.Send(&pgproto3.Execute{Portal: "p1", MaxRows: 0})
+	fe.Send(&pgproto3.Sync{})
+
+	// Drain a few responses with time-bounded loop
+	deadline = time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		msg, _ := fe.Receive()
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
 		}
 	}
 }

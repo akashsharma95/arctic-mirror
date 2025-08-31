@@ -10,6 +10,7 @@ import (
 
 	"arctic-mirror/config"
 	"arctic-mirror/iceberg"
+	"arctic-mirror/metrics"
 	"arctic-mirror/schema"
 
 	"github.com/jackc/pglogrepl"
@@ -24,6 +25,7 @@ type Replicator struct {
 	replicationConn *pgconn.PgConn
 	writer          *iceberg.Writer
 	schemaManager   *schema.Manager
+	checkpoint      *LSNCheckpoint
 }
 
 func NewReplicator(cfg *config.Config) (*Replicator, error) {
@@ -71,12 +73,16 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 		return nil, fmt.Errorf("creating iceberg writer: %w", err)
 	}
 
+	// Initialize LSN checkpoint under Iceberg path
+	checkpoint := NewLSNCheckpoint(fmt.Sprintf("%s/.replication/lsn.checkpoint", cfg.Iceberg.Path))
+
 	return &Replicator{
 		config:          cfg,
 		dbConn:          dbConn,
 		replicationConn: replicationConn,
 		writer:          writer,
 		schemaManager:   schemaManager,
+		checkpoint:      checkpoint,
 	}, nil
 }
 
@@ -128,8 +134,14 @@ func (r *Replicator) startReplication(ctx context.Context) error {
 		return fmt.Errorf("replication connection not initialized")
 	}
 
-	// Get the current WAL position (LSN)
-	var startLSN pglogrepl.LSN = 0 // Replace with your starting LSN
+	// Get the current WAL position (LSN) from checkpoint if available
+	startLSN := pglogrepl.LSN(0)
+	if r.checkpoint != nil {
+		if saved, err := r.checkpoint.Load(); err == nil && saved > 0 {
+			startLSN = saved
+			log.Printf("Starting replication from checkpoint LSN %s", saved.String())
+		}
+	}
 
 	// Start replication
 	err := pglogrepl.StartReplication(ctx, r.replicationConn, r.config.Postgres.Slot, startLSN, pglogrepl.StartReplicationOptions{
@@ -168,6 +180,10 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 			}
 			log.Printf("Sent Standby status message at %s\n", clientXLogPos.String())
 			nextStandbyMessageDeadline = time.Now().Add(standbyMessageTimeout)
+			// Persist checkpoint periodically
+			if r.checkpoint != nil {
+				_ = r.checkpoint.Save(clientXLogPos)
+			}
 		}
 
 		rawMsg, err := r.replicationConn.ReceiveMessage(ctx)
@@ -203,6 +219,8 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 			if pkm.ServerWALEnd > clientXLogPos {
 				clientXLogPos = pkm.ServerWALEnd
 			}
+			// Metrics: lag bytes (approx)
+			metrics.ReplicationLagBytes.Set(float64(uint64(pkm.ServerWALEnd) - uint64(clientXLogPos)))
 			if pkm.ReplyRequested {
 				nextStandbyMessageDeadline = time.Time{}
 			}
@@ -217,6 +235,11 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 			if xld.WALStart > clientXLogPos {
 				clientXLogPos = xld.WALStart
 			}
+			metrics.ReplicationLastLSN.Set(float64(uint64(clientXLogPos)))
+			// Persist checkpoint on data message
+			if r.checkpoint != nil {
+				_ = r.checkpoint.Save(clientXLogPos)
+			}
 
 			walData := xld.WALData
 			logicalMsg, err := pglogrepl.ParseV2(walData, inStream)
@@ -226,23 +249,27 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 
 			switch m := logicalMsg.(type) {
 			case *pglogrepl.RelationMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("relation").Inc()
 				relations[m.RelationID] = m
 				// Update schema if necessary
 				if err := r.schemaManager.HandleRelationMessage(m); err != nil {
 					return fmt.Errorf("handling relation message: %w", err)
 				}
-
+			
 			case *pglogrepl.BeginMessage:
 				// Handle begin
+				metrics.ReplicationMessagesTotal.WithLabelValues("begin").Inc()
 				log.Println("Begin transaction")
-
+			
 			case *pglogrepl.CommitMessage:
 				// Handle commit
+				metrics.ReplicationMessagesTotal.WithLabelValues("commit").Inc()
 				if err := r.writer.Commit(); err != nil {
 					return fmt.Errorf("committing: %w", err)
 				}
-
+			
 			case *pglogrepl.InsertMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("insert").Inc()
 				log.Printf("insert for xid %d\n", m.Xid)
 				rel, ok := relations[m.RelationID]
 				if !ok {
@@ -251,8 +278,9 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteInsert(m, rel); err != nil {
 					return fmt.Errorf("writing insert: %w", err)
 				}
-
+			
 			case *pglogrepl.UpdateMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("update").Inc()
 				log.Printf("update for xid %d\n", m.Xid)
 				rel, ok := relations[m.RelationID]
 				if !ok {
@@ -261,8 +289,9 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteUpdate(m, rel); err != nil {
 					return fmt.Errorf("writing update: %w", err)
 				}
-
+			
 			case *pglogrepl.DeleteMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("delete").Inc()
 				log.Printf("delete for xid %d\n", m.Xid)
 				rel, ok := relations[m.RelationID]
 				if !ok {
@@ -271,21 +300,27 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteDelete(m, rel); err != nil {
 					return fmt.Errorf("writing delete: %w", err)
 				}
-
+			
 			case *pglogrepl.LogicalDecodingMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("logical_decoding").Inc()
 				log.Printf("Logical decoding message")
-
+			
 			case *pglogrepl.StreamStartMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("stream_start").Inc()
 				inStream = true
 				log.Printf("Stream start message")
 			case *pglogrepl.StreamStopMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("stream_stop").Inc()
 				inStream = false
 				log.Printf("Stream stop message")
 			case *pglogrepl.StreamCommitMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("stream_commit").Inc()
 				log.Printf("Stream commit message")
 			case *pglogrepl.StreamAbortMessageV2:
+				metrics.ReplicationMessagesTotal.WithLabelValues("stream_abort").Inc()
 				log.Printf("Stream abort message")
 			default:
+				metrics.ReplicationMessagesTotal.WithLabelValues("unknown").Inc()
 				log.Printf("Unknown message type in pgoutput stream")
 			}
 
