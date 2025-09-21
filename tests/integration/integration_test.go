@@ -20,6 +20,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "github.com/marcboeker/go-duckdb"
 )
 
 // IntegrationTestSuite holds the integration test environment
@@ -29,7 +30,7 @@ type IntegrationTestSuite struct {
 	duckDBProxy       *proxy.DuckDBProxy
 	replicator        *replication.Replicator
 	schemaManager     *schema.Manager
-	icebergWriter     *iceberg.Writer
+	icebergWriter     *iceberg.DuckDBWriter
 	ctx               context.Context
 	cleanupFuncs      []func()
 }
@@ -113,8 +114,14 @@ func (ts *IntegrationTestSuite) setupIntegrationTest(t *testing.T) error {
 		return fmt.Errorf("failed to create replicator: %w", err)
 	}
 
-	// Initialize Iceberg writer
-	ts.icebergWriter, err = iceberg.NewWriter("/tmp/iceberg_test", ts.schemaManager)
+	// Create DuckDB connection for Iceberg writer
+	duckdbConn, err := sql.Open("duckdb", "")
+	if err != nil {
+		return fmt.Errorf("failed to open duckdb connection: %w", err)
+	}
+
+	// Initialize DuckDB-based Iceberg writer (handles extension loading and catalog config)
+	ts.icebergWriter, err = iceberg.NewDuckDBWriter(duckdbConn, "/tmp/iceberg_test", ts.schemaManager)
 	if err != nil {
 		return fmt.Errorf("failed to create Iceberg writer: %w", err)
 	}
@@ -129,6 +136,9 @@ func (ts *IntegrationTestSuite) setupIntegrationTest(t *testing.T) error {
 		}
 		if ts.duckDBProxy != nil {
 			ts.duckDBProxy.Close()
+		}
+		if ts.icebergWriter != nil {
+			ts.icebergWriter.Close()
 		}
 	})
 
