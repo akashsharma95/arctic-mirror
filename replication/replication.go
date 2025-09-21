@@ -74,12 +74,7 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 		return nil, fmt.Errorf("opening duckdb connection: %w", err)
 	}
 
-	// Load Iceberg extension
-	if _, err := duckdbConn.Exec("INSTALL iceberg; LOAD iceberg;"); err != nil {
-		return nil, fmt.Errorf("loading iceberg extension: %w", err)
-	}
-
-	// Initialize DuckDB-based Iceberg writer
+	// Initialize DuckDB-based Iceberg writer (handles extension loading and catalog config)
 	writer, err := iceberg.NewDuckDBWriter(duckdbConn, cfg.Iceberg.Path, schemaManager)
 	if err != nil {
 		return nil, fmt.Errorf("creating iceberg writer: %w", err)

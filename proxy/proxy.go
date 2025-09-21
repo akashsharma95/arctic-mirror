@@ -46,7 +46,7 @@ func NewDuckDBProxy(cfg *config.Config) (*DuckDBProxy, error) {
 	}
 
 	// Install and load extensions
-	if err := loadExtensions(db); err != nil {
+	if err := loadExtensions(db, cfg.Iceberg.Path); err != nil {
 		return nil, fmt.Errorf("loading extensions: %w", err)
 	}
 
@@ -65,13 +65,21 @@ func NewDuckDBProxy(cfg *config.Config) (*DuckDBProxy, error) {
 	}, nil
 }
 
-func loadExtensions(db *sql.DB) error {
+func loadExtensions(db *sql.DB, icebergPath string) error {
 	extensions := []string{"iceberg", "parquet"}
 	for _, ext := range extensions {
 		if _, err := db.Exec(fmt.Sprintf("INSTALL %s; LOAD %s;", ext, ext)); err != nil {
 			return fmt.Errorf("loading extension %s: %w", ext, err)
 		}
 	}
+
+	// Configure Iceberg catalog path if provided
+	if icebergPath != "" {
+		if _, err := db.Exec(fmt.Sprintf("SET iceberg.catalog.hadoop_catalog.warehouse = '%s'", icebergPath)); err != nil {
+			return fmt.Errorf("configuring iceberg catalog: %w", err)
+		}
+	}
+
 	return nil
 }
 

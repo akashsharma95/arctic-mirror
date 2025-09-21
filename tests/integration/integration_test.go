@@ -120,12 +120,7 @@ func (ts *IntegrationTestSuite) setupIntegrationTest(t *testing.T) error {
 		return fmt.Errorf("failed to open duckdb connection: %w", err)
 	}
 
-	// Load Iceberg extension
-	if _, err := duckdbConn.Exec("INSTALL iceberg; LOAD iceberg;"); err != nil {
-		return fmt.Errorf("failed to load iceberg extension: %w", err)
-	}
-
-	// Initialize DuckDB-based Iceberg writer
+	// Initialize DuckDB-based Iceberg writer (handles extension loading and catalog config)
 	ts.icebergWriter, err = iceberg.NewDuckDBWriter(duckdbConn, "/tmp/iceberg_test", ts.schemaManager)
 	if err != nil {
 		return fmt.Errorf("failed to create Iceberg writer: %w", err)

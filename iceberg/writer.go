@@ -46,6 +46,11 @@ func NewDuckDBWriter(db *sql.DB, basePath string, schemaManager *schema.Manager)
 		return nil, fmt.Errorf("failed to setup base path: %w", err)
 	}
 
+	// Configure Iceberg catalog path
+	if _, err := db.Exec(fmt.Sprintf("SET iceberg.catalog.hadoop_catalog.warehouse = '%s'", basePath)); err != nil {
+		return nil, fmt.Errorf("configuring iceberg catalog: %w", err)
+	}
+
 	return &DuckDBWriter{
 		db:            db,
 		basePath:      basePath,
@@ -95,8 +100,9 @@ func (w *DuckDBWriter) WriteInsert(msg *pglogrepl.InsertMessageV2, rel *pglogrep
 	placeholders := strings.Repeat("?, ", len(tableInfo.ColumnNames))
 	placeholders = placeholders[:len(placeholders)-2] // Remove trailing ", "
 
-	query := fmt.Sprintf("INSERT INTO iceberg.\"%s.%s\" (%s) VALUES (%s)",
-		tableInfo.Schema, tableInfo.Table, columns, placeholders)
+	fullTableName := fmt.Sprintf("%s.%s", tableInfo.Schema, tableInfo.Table)
+	query := fmt.Sprintf("INSERT INTO \"%s\" (%s) VALUES (%s)",
+		fullTableName, columns, placeholders)
 
 	// Extract values from tuple
 	values, err := w.extractValuesFromTuple(msg.Tuple, rel)
@@ -136,8 +142,9 @@ func (w *DuckDBWriter) writeTupleAsInsert(tuple *pglogrepl.TupleData, rel *pglog
 	placeholders := strings.Repeat("?, ", len(tableInfo.ColumnNames))
 	placeholders = placeholders[:len(placeholders)-2] // Remove trailing ", "
 
-	query := fmt.Sprintf("INSERT INTO iceberg.\"%s.%s\" (%s) VALUES (%s)",
-		tableInfo.Schema, tableInfo.Table, columns, placeholders)
+	fullTableName := fmt.Sprintf("%s.%s", tableInfo.Schema, tableInfo.Table)
+	query := fmt.Sprintf("INSERT INTO \"%s\" (%s) VALUES (%s)",
+		fullTableName, columns, placeholders)
 
 	// Extract values from tuple
 	values, err := w.extractValuesFromTuple(tuple, rel)
@@ -187,6 +194,11 @@ func (w *DuckDBWriter) getTableInfo(relationID uint32) (*TableInfo, error) {
 	for _, col := range pgSchema.Columns {
 		columnNames = append(columnNames, col.Name)
 		columnTypes = append(columnTypes, postgresTypeToDuckDB(col.TypeOID))
+	}
+
+	// Create the Iceberg table if it doesn't exist
+	if err := w.CreateIcebergTable(pgSchema.Schema, pgSchema.Name, columnNames, columnTypes); err != nil {
+		return nil, fmt.Errorf("creating iceberg table: %w", err)
 	}
 
 	info := &TableInfo{
@@ -308,15 +320,17 @@ func (w *DuckDBWriter) CreateIcebergTable(schemaName, tableName string, columnNa
 		columns = append(columns, fmt.Sprintf("\"%s\" %s", name, columnTypes[i]))
 	}
 
-	// Create table statement
-	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS iceberg.\"%s.%s\" (%s)",
-		schemaName, tableName, strings.Join(columns, ", "))
+	// Create table statement using proper Iceberg syntax
+	// DuckDB uses a different syntax for Iceberg tables
+	fullTableName := fmt.Sprintf("%s.%s", schemaName, tableName)
+	query := fmt.Sprintf("CREATE OR REPLACE TABLE \"%s\" (%s) USING iceberg",
+		fullTableName, strings.Join(columns, ", "))
 
 	_, err := w.db.Exec(query)
 	if err != nil {
 		return fmt.Errorf("creating Iceberg table: %w", err)
 	}
 
-	log.Printf("Created/verified Iceberg table: %s.%s", schemaName, tableName)
+	log.Printf("Created/verified Iceberg table: %s", fullTableName)
 	return nil
 }
