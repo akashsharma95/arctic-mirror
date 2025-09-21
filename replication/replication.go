@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -23,7 +24,7 @@ type Replicator struct {
 	config          *config.Config
 	dbConn          *pgx.Conn
 	replicationConn *pgconn.PgConn
-	writer          *iceberg.Writer
+	writer          *iceberg.DuckDBWriter
 	schemaManager   *schema.Manager
 	checkpoint      *LSNCheckpoint
 }
@@ -67,8 +68,19 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 		return nil, fmt.Errorf("connecting to postgres for replication: %w", err)
 	}
 
-	// Initialize Iceberg writer
-	writer, err := iceberg.NewWriter(cfg.Iceberg.Path, schemaManager)
+	// Create DuckDB connection for Iceberg writes
+	duckdbConn, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, fmt.Errorf("opening duckdb connection: %w", err)
+	}
+
+	// Load Iceberg extension
+	if _, err := duckdbConn.Exec("INSTALL iceberg; LOAD iceberg;"); err != nil {
+		return nil, fmt.Errorf("loading iceberg extension: %w", err)
+	}
+
+	// Initialize DuckDB-based Iceberg writer
+	writer, err := iceberg.NewDuckDBWriter(duckdbConn, cfg.Iceberg.Path, schemaManager)
 	if err != nil {
 		return nil, fmt.Errorf("creating iceberg writer: %w", err)
 	}
@@ -344,22 +356,28 @@ func (r *Replicator) GetReplicationConn() *pgconn.PgConn {
 // Close closes all connections and cleans up resources
 func (r *Replicator) Close() error {
 	var errors []string
-	
+
+	if r.writer != nil {
+		if err := r.writer.Close(); err != nil {
+			errors = append(errors, fmt.Sprintf("writer: %v", err))
+		}
+	}
+
 	if r.dbConn != nil {
 		if err := r.dbConn.Close(context.Background()); err != nil {
 			errors = append(errors, fmt.Sprintf("database connection: %v", err))
 		}
 	}
-	
+
 	if r.replicationConn != nil {
 		if err := r.replicationConn.Close(context.Background()); err != nil {
 			errors = append(errors, fmt.Sprintf("replication connection: %v", err))
 		}
 	}
-	
+
 	if len(errors) > 0 {
 		return fmt.Errorf("errors during shutdown: %s", strings.Join(errors, "; "))
 	}
-	
+
 	return nil
 }
