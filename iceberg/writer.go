@@ -1,592 +1,235 @@
 package iceberg
 
 import (
-	"context"
-	"encoding/json"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"sync"
-	"time"
 
 	"arctic-mirror/schema"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/parquet-go/parquet-go"
+	_ "github.com/marcboeker/go-duckdb"
 )
+
+// DuckDB-backed Iceberg writer leveraging DuckDB's native iceberg write support.
+
+const duckDBIcebergCatalog = "am_iceberg"
 
 type Writer struct {
 	basePath      string
-	writers       map[uint32]*tableWriter
-	mu            sync.RWMutex
+	db            *sql.DB
 	schemaManager *schema.Manager
+	mu            sync.Mutex
+	tables        map[uint32]*tableState
 }
 
-type tableWriter struct {
-	schema        *SchemaV2
-	parquetSchema *parquet.Schema
-	writer        *parquet.GenericWriter[map[string]interface{}]
-	path          string
-	records       int64
-	metadata      *TableMetadata
-	manifests     []ManifestEntry
-	mu            sync.Mutex
-	file          *os.File
+type tableState struct {
+	qualifiedName string // catalog.schema.table
+	insertSQL     string
+	insertStmt    *sql.Stmt
 }
 
 func NewWriter(basePath string, schemaManager *schema.Manager) (*Writer, error) {
-	// Validate that the base path is accessible
 	if basePath == "" {
 		return nil, fmt.Errorf("base path cannot be empty")
 	}
 
-	// Check if we can create the directory (or if it already exists and is writable)
-	if err := os.MkdirAll(basePath, 0755); err != nil {
-		return nil, fmt.Errorf("cannot create or access base path %s: %w", basePath, err)
+	// Initialize DuckDB in-process
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, fmt.Errorf("opening duckdb: %w", err)
 	}
 
-	// Test if we can write to the directory
-	testFile := filepath.Join(basePath, ".test_write")
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
-		return nil, fmt.Errorf("cannot write to base path %s: %w", basePath, err)
+	// Enable iceberg support and attach the catalog at the provided warehouse path
+	if _, err := db.Exec("INSTALL iceberg; LOAD iceberg;"); err != nil {
+		return nil, fmt.Errorf("loading iceberg extension: %w", err)
 	}
-	os.Remove(testFile) // Clean up test file
+
+	attach := fmt.Sprintf("ATTACH '%s' AS %s (TYPE iceberg);", escapeSingleQuotes(basePath), duckDBIcebergCatalog)
+	if _, err := db.Exec(attach); err != nil {
+		return nil, fmt.Errorf("attaching iceberg catalog: %w", err)
+	}
 
 	return &Writer{
 		basePath:      basePath,
-		writers:       make(map[uint32]*tableWriter),
+		db:            db,
 		schemaManager: schemaManager,
+		tables:        make(map[uint32]*tableState),
 	}, nil
 }
 
 func (w *Writer) WriteInsert(msg *pglogrepl.InsertMessageV2, rel *pglogrepl.RelationMessageV2) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	tw, err := w.getTableWriter(msg.RelationID)
-	if err != nil {
-		return err
-	}
-
-	record, err := tw.mapTupleToRecord(msg.Tuple, rel)
-	if err != nil {
-		return fmt.Errorf("mapping tuple to record: %w", err)
-	}
-
-	if _, err := tw.writer.Write([]map[string]interface{}{record}); err != nil {
-		return fmt.Errorf("writing record: %w", err)
-	}
-
-	tw.records++
-	return nil
+	return w.insertTuple(msg.RelationID, msg.Tuple, rel)
 }
 
 func (w *Writer) WriteUpdate(msg *pglogrepl.UpdateMessageV2, rel *pglogrepl.RelationMessageV2) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	tw, err := w.getTableWriter(msg.RelationID)
-	if err != nil {
-		return err
-	}
-
-	record, err := tw.mapTupleToRecord(msg.NewTuple, rel)
-	if err != nil {
-		return fmt.Errorf("mapping tuple to record: %w", err)
-	}
-
-	if _, err := tw.writer.Write([]map[string]interface{}{record}); err != nil {
-		return fmt.Errorf("writing record: %w", err)
-	}
-
-	tw.records++
-	return nil
+	// Append-only for now, treat update as insert of the new row
+	return w.insertTuple(msg.RelationID, msg.NewTuple, rel)
 }
 
-func (w *Writer) WriteDelete(msg *pglogrepl.DeleteMessageV2, rel *pglogrepl.RelationMessageV2) error {
-	// Implement delete handling if necessary
-	// For simplicity, you might log or skip deletes
+func (w *Writer) WriteDelete(_ *pglogrepl.DeleteMessageV2, _ *pglogrepl.RelationMessageV2) error {
+	// No-op for now (append-only)
 	return nil
 }
 
 func (w *Writer) Commit() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	for _, tw := range w.writers {
-		if err := tw.commit(context.Background()); err != nil {
-			return err
-		}
-	}
-
-	// Clear writers after commit
-	w.writers = make(map[uint32]*tableWriter)
+	// DuckDB autocommit is enabled by default; nothing to do.
 	return nil
 }
 
-func (w *Writer) getTableWriter(relationID uint32) (*tableWriter, error) {
-	if tw, exists := w.writers[relationID]; exists {
-		return tw, nil
-	}
+func (w *Writer) insertTuple(relationID uint32, tuple *pglogrepl.TupleData, rel *pglogrepl.RelationMessageV2) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	tw, err := w.createWriter(relationID)
+	ts, err := w.getOrInitTableState(relationID, rel)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	w.writers[relationID] = tw
-	return tw, nil
+	params, err := tupleToParams(tuple, rel)
+	if err != nil {
+		return fmt.Errorf("mapping tuple to params: %w", err)
+	}
+
+	if ts.insertStmt == nil {
+		stmt, prepErr := w.db.Prepare(ts.insertSQL)
+		if prepErr != nil {
+			return fmt.Errorf("preparing insert: %w", prepErr)
+		}
+		ts.insertStmt = stmt
+	}
+
+	if _, err := ts.insertStmt.Exec(params...); err != nil {
+		return fmt.Errorf("executing insert: %w", err)
+	}
+	return nil
 }
 
-func (w *Writer) createWriter(relationID uint32) (*tableWriter, error) {
-	// Get PostgreSQL schema
+func (w *Writer) getOrInitTableState(relationID uint32, rel *pglogrepl.RelationMessageV2) (*tableState, error) {
+	if ts, ok := w.tables[relationID]; ok {
+		return ts, nil
+	}
+
 	pgSchema, err := w.schemaManager.GetSchema(relationID)
 	if err != nil {
 		return nil, fmt.Errorf("getting schema: %w", err)
 	}
 
-	// Create Iceberg schema
-	schema := SchemaV2{
-		SchemaID: 0,
-		Fields:   make([]Field, 0, len(pgSchema.Columns)),
+	qualified := fmt.Sprintf("%s.%s.%s", duckDBIcebergCatalog, quoteIdent(pgSchema.Schema), quoteIdent(pgSchema.Name))
+
+	// Ensure namespace exists
+	createSchema := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.%s;", duckDBIcebergCatalog, quoteIdent(pgSchema.Schema))
+	if _, err := w.db.Exec(createSchema); err != nil {
+		return nil, fmt.Errorf("creating namespace: %w", err)
 	}
 
-	// Map PostgreSQL types to Iceberg types
-	for i, col := range pgSchema.Columns {
-		field := Field{
-			ID:       i + 1,
-			Name:     col.Name,
-			Required: !col.Nullable,
-			Type:     postgresTypeToIceberg(col.TypeOID),
+	// Ensure table exists with appropriate column types
+	cols := make([]string, 0, len(pgSchema.Columns))
+	for _, c := range pgSchema.Columns {
+		colDef := fmt.Sprintf("%s %s", quoteIdent(c.Name), pgOIDToDuckDBType(c.TypeOID, c.TypeName))
+		if !c.Nullable {
+			colDef += " NOT NULL"
 		}
-		schema.Fields = append(schema.Fields, field)
+		cols = append(cols, colDef)
+	}
+	createTable := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s);", qualified, strings.Join(cols, ", "))
+	if _, err := w.db.Exec(createTable); err != nil {
+		return nil, fmt.Errorf("creating iceberg table: %w", err)
 	}
 
-	// Create Parquet schema from Iceberg schema
-	parquetSchema, err := createParquetSchema(schema)
-	if err != nil {
-		return nil, fmt.Errorf("creating parquet schema: %w", err)
+	// Prepare insert SQL
+	colNames := make([]string, len(rel.Columns))
+	placeholders := make([]string, len(rel.Columns))
+	for i, c := range rel.Columns {
+		colNames[i] = quoteIdent(c.Name)
+		placeholders[i] = "?"
 	}
+	insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", qualified, strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
 
-	// Create data path
-	dataPath := fmt.Sprintf(
-		"data/%s.%s/%s.parquet",
-		pgSchema.Schema,
-		pgSchema.Name,
-		time.Now().Format("20060102150405"),
-	)
-	fullPath := filepath.Join(w.basePath, dataPath)
-
-	// Initialize table metadata if not exists
-	metadata, err := w.getOrCreateMetadata(pgSchema, schema)
-	if err != nil {
-		return nil, fmt.Errorf("initializing metadata: %w", err)
-	}
-
-	// Create directories if they don't exist
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return nil, fmt.Errorf("creating directories: %w", err)
-	}
-
-	// Open Parquet file
-	file, err := os.Create(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("creating parquet file: %w", err)
-	}
-
-	// Initialize Parquet writer
-	pw := parquet.NewGenericWriter[map[string]interface{}](file, parquetSchema)
-
-	return &tableWriter{
-		schema:        &schema,
-		parquetSchema: parquetSchema,
-		writer:        pw,
-		path:          dataPath,
-		metadata:      metadata,
-		file:          file,
-		manifests:     make([]ManifestEntry, 0),
-	}, nil
+	ts := &tableState{qualifiedName: qualified, insertSQL: insertSQL}
+	w.tables[relationID] = ts
+	return ts, nil
 }
 
-func (w *Writer) getOrCreateMetadata(pgSchema *schema.TableSchema, icebergSchema SchemaV2) (*TableMetadata, error) {
-	metadataPath := filepath.Join(w.basePath, pgSchema.Schema, pgSchema.Name, "metadata", "metadata.json")
-
-	// Check if metadata exists
-	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
-		// Create new metadata
-		metadata := &TableMetadata{
-			FormatVersion: 2,
-			TableUUID:     uuid.New().String(),
-			Location:      filepath.Dir(metadataPath),
-			LastUpdated:   time.Now().UnixNano() / int64(time.Millisecond),
-			LastColumnID:  len(icebergSchema.Fields),
-			SchemaID:      icebergSchema.SchemaID,
-			Schemas:       []SchemaV2{icebergSchema},
-			CurrentSchema: icebergSchema,
-			PartitionSpec: []PartitionSpec{}, // No partitioning
-			Properties:    map[string]string{},
-			Snapshots:     []*Snapshot{},
-		}
-
-		// Write metadata
-		if err := w.writeMetadata(context.Background(), metadata, metadataPath); err != nil {
-			return nil, fmt.Errorf("writing metadata: %w", err)
-		}
-
-		return metadata, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("checking metadata: %w", err)
-	}
-
-	// Load existing metadata
-	file, err := os.Open(metadataPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening metadata: %w", err)
-	}
-	defer file.Close()
-
-	var metadata TableMetadata
-	if err := json.NewDecoder(file).Decode(&metadata); err != nil {
-		return nil, fmt.Errorf("decoding metadata: %w", err)
-	}
-
-	return &metadata, nil
-}
-
-func (w *Writer) writeMetadata(ctx context.Context, metadata *TableMetadata, metadataPath string) error {
-	metadataDir := filepath.Dir(metadataPath)
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
-		return fmt.Errorf("creating metadata directory: %w", err)
-	}
-
-	file, err := os.Create(metadataPath)
-	if err != nil {
-		return fmt.Errorf("creating metadata file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(metadata); err != nil {
-		return fmt.Errorf("encoding metadata: %w", err)
-	}
-
-	return nil
-}
-
-func (tw *tableWriter) mapTupleToRecord(tuple *pglogrepl.TupleData, rel *pglogrepl.RelationMessageV2) (map[string]interface{}, error) {
+func tupleToParams(tuple *pglogrepl.TupleData, rel *pglogrepl.RelationMessageV2) ([]interface{}, error) {
 	typeMap := pgtype.NewMap()
-
-	record := make(map[string]interface{})
-
+	params := make([]interface{}, len(rel.Columns))
 	for idx, col := range tuple.Columns {
-		colName := rel.Columns[idx].Name
 		dataType := rel.Columns[idx].DataType
-		formatCode := pgtype.TextFormatCode // or pgtype.BinaryFormatCode, depending on `col.DataType`
-
 		switch col.DataType {
-		case 'n': // null
-			record[colName] = nil
-		case 't': // text
-			// Decode the column data according to its PostgreSQL data type
-			val, err := decodeColumnData(typeMap, col.Data, dataType, int16(formatCode))
+		case 'n':
+			params[idx] = nil
+		case 't':
+			val, err := decodeColumnData(typeMap, col.Data, dataType, int16(pgtype.TextFormatCode))
 			if err != nil {
-				return nil, fmt.Errorf("decoding column data for %s: %w", colName, err)
+				return nil, fmt.Errorf("decoding column %s: %w", rel.Columns[idx].Name, err)
 			}
-			record[colName] = val
-		case 'b': // binary
-			// Handle binary data if necessary
-			record[colName] = col.Data
-		case 'u': // unchanged TOAST data
-			record[colName] = nil
+			params[idx] = val
+		case 'b':
+			// Pass through binary data
+			params[idx] = []byte(col.Data)
+		case 'u':
+			// unchanged TOAST; set NULL
+			params[idx] = nil
 		default:
 			return nil, fmt.Errorf("unknown column data type: %v", col.DataType)
 		}
 	}
-	return record, nil
+	return params, nil
 }
 
 func decodeColumnData(typeMap *pgtype.Map, data []byte, dataTypeOID uint32, formatCode int16) (interface{}, error) {
-	// Retrieve the DataType for the given OID
 	dataType, ok := typeMap.TypeForOID(dataTypeOID)
 	if !ok {
-		// If the data type is unknown, default to returning the data as a string
 		return string(data), nil
 	}
-
-	// Use the Codec's DecodeValue method to decode the data directly
 	value, err := dataType.Codec.DecodeValue(typeMap, dataTypeOID, formatCode, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode value for OID %d: %w", dataTypeOID, err)
 	}
-
-	// Return the decoded Go value
 	return value, nil
 }
 
-func (tw *tableWriter) commit(ctx context.Context) error {
-	// This method is deprecated - use Close() instead
-	return fmt.Errorf("commit() is deprecated, use Close() instead")
+func quoteIdent(id string) string {
+	return "\"" + strings.ReplaceAll(id, "\"", "\"\"") + "\""
 }
 
-func (tw *tableWriter) collectMetrics() FileMetrics {
-	// Collect actual metrics from Parquet writer (simplified)
-	return FileMetrics{
-		ColumnSizes:     make(map[int]int64),
-		ValueCounts:     make(map[int]int64),
-		NullValueCounts: make(map[int]int64),
-		LowerBounds:     make(map[int][]byte),
-		UpperBounds:     make(map[int][]byte),
-	}
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
-func (tw *tableWriter) writeManifest(ctx context.Context, manifestPath string) error {
-	// Implement writing manifest entries using Avro (simplified)
-	// For the sake of example, we'll write JSON
-	fullPath := filepath.Join(tw.metadata.Location, manifestPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return fmt.Errorf("creating manifest directory: %w", err)
-	}
-
-	file, err := os.Create(fullPath)
-	if err != nil {
-		return fmt.Errorf("creating manifest file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(tw.manifests); err != nil {
-		return fmt.Errorf("encoding manifest: %w", err)
-	}
-
-	return nil
-}
-
-func (tw *tableWriter) writeMetadata(ctx context.Context, metadata *TableMetadata, metadataPath string) error {
-	file, err := os.Create(metadataPath)
-	if err != nil {
-		return fmt.Errorf("creating metadata file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(metadata); err != nil {
-		return fmt.Errorf("encoding metadata: %w", err)
-	}
-
-	return nil
-}
-
-func (tw *tableWriter) writeSnapshot(ctx context.Context, snapshot *Snapshot, snapshotPath string) error {
-	file, err := os.Create(snapshotPath)
-	if err != nil {
-		return fmt.Errorf("creating snapshot file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(snapshot); err != nil {
-		return fmt.Errorf("encoding snapshot: %w", err)
-	}
-
-	return nil
-}
-
-func (tw *tableWriter) writeManifestList(ctx context.Context, manifestPaths []string, manifestListPath string) error {
-	file, err := os.Create(manifestListPath)
-	if err != nil {
-		return fmt.Errorf("creating manifest list file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(manifestPaths); err != nil {
-		return fmt.Errorf("encoding manifest list: %w", err)
-	}
-
-	return nil
-}
-
-func (tw *tableWriter) Close(ctx context.Context) error {
-	tw.mu.Lock()
-	defer tw.mu.Unlock()
-
-	if tw.writer == nil {
-		return nil
-	}
-
-	// Close Parquet writer
-	if err := tw.writer.Close(); err != nil {
-		return fmt.Errorf("closing parquet writer: %w", err)
-	}
-
-	// Close file
-	if err := tw.file.Close(); err != nil {
-		return fmt.Errorf("closing file: %w", err)
-	}
-
-	// Get file info for manifest
-	fullDataPath := filepath.Join(tw.metadata.Location, tw.path)
-	fileInfo, err := os.Stat(fullDataPath)
-	if err != nil {
-		return fmt.Errorf("getting file info: %w", err)
-	}
-
-	// Create manifest entry with proper file path
-	// The file path should be relative to the table location
-	relativeDataPath := tw.path
-	entry := ManifestEntry{
-		Status:     1, // Added
-		SnapshotID: time.Now().UnixNano() / int64(time.Millisecond),
-		SequenceNum: 1,
-		FileSequence: 1,
-		DataFile: DataFile{
-			FilePath:      relativeDataPath, // Relative path from table root
-			FileFormat:    "PARQUET",
-			Partition:     make(map[string]string), // No partitioning for now
-			RecordCount:   tw.records,
-			FileSizeBytes: fileInfo.Size(),
-			Metrics:       tw.collectMetrics(),
-		},
-	}
-
-	tw.manifests = append(tw.manifests, entry)
-
-	// Write manifest file
-	manifestPath := fmt.Sprintf("manifests/manifest_%d.json", entry.SnapshotID)
-	if err := tw.writeManifest(ctx, manifestPath); err != nil {
-		return fmt.Errorf("writing manifest: %w", err)
-	}
-
-	// Create snapshot
-	snapshot := &Snapshot{
-		SnapshotID:        entry.SnapshotID,
-		ParentSnapshotID:  0, // First snapshot
-		SequenceNumber:    1,
-		TimestampMs:       entry.SnapshotID,
-		ManifestList:      manifestPath,
-		Summary: map[string]string{
-			"added-data-files": "1",
-			"total-data-files": fmt.Sprintf("%d", len(tw.manifests)),
-			"total-records":    fmt.Sprintf("%d", tw.records),
-		},
-	}
-
-	// Update metadata
-	tw.metadata.CurrentSnapshot = snapshot
-	tw.metadata.Snapshots = append(tw.metadata.Snapshots, snapshot)
-	tw.metadata.LastUpdated = time.Now().UnixNano() / int64(time.Millisecond)
-
-	// Write updated metadata
-	metadataPath := filepath.Join(tw.metadata.Location, "metadata", "metadata.json")
-	if err := tw.writeMetadata(ctx, tw.metadata, metadataPath); err != nil {
-		return fmt.Errorf("writing metadata: %w", err)
-	}
-
-	// Write snapshot metadata
-	snapshotPath := filepath.Join(tw.metadata.Location, "metadata", fmt.Sprintf("snapshot-%d.json", snapshot.SnapshotID))
-	if err := tw.writeSnapshot(ctx, snapshot, snapshotPath); err != nil {
-		return fmt.Errorf("writing snapshot: %w", err)
-	}
-
-	// Write manifest list
-	manifestListPath := filepath.Join(tw.metadata.Location, "metadata", fmt.Sprintf("manifest-list-%d.json", snapshot.SnapshotID))
-	if err := tw.writeManifestList(ctx, []string{manifestPath}, manifestListPath); err != nil {
-		return fmt.Errorf("writing manifest list: %w", err)
-	}
-
-	return nil
-}
-
-// Helper functions
-func postgresTypeToIceberg(pgTypeOID uint32) string {
+func pgOIDToDuckDBType(pgTypeOID uint32, typeName string) string {
 	switch pgTypeOID {
-	// Integer types
 	case pgtype.Int2OID:
-		return "int"
+		return "SMALLINT"
 	case pgtype.Int4OID:
-		return "int"
+		return "INTEGER"
 	case pgtype.Int8OID:
-		return "long"
-	
-	// Floating point types
+		return "BIGINT"
 	case pgtype.Float4OID:
-		return "float"
+		return "REAL"
 	case pgtype.Float8OID:
-		return "double"
-	
-	// Character types
-	case pgtype.BPCharOID:
-		return "string"
-	case pgtype.VarcharOID:
-		return "string"
-	case pgtype.TextOID:
-		return "string"
-	
-	// Boolean type
+		return "DOUBLE"
+	case pgtype.BPCharOID, pgtype.VarcharOID, pgtype.TextOID:
+		return "VARCHAR"
 	case pgtype.BoolOID:
-		return "boolean"
-	
-	// Date and time types
+		return "BOOLEAN"
 	case pgtype.DateOID:
-		return "date"
+		return "DATE"
 	case pgtype.TimestampOID:
-		return "timestamp"
+		return "TIMESTAMP"
 	case pgtype.TimestamptzOID:
-		return "timestamptz"
-	
-	// Binary types
+		return "TIMESTAMPTZ"
 	case pgtype.ByteaOID:
-		return "binary"
-	
-	// Unknown types
+		return "BLOB"
+	case pgtype.NumericOID:
+		// Fallback generic precision
+		return "DECIMAL(38, 10)"
 	default:
-		return "string" // Default to string for unknown types
+		_ = typeName
+		return "VARCHAR"
 	}
 }
 
-func createParquetSchema(schema SchemaV2) (*parquet.Schema, error) {
-	root := make(parquet.Group)
-
-	for _, field := range schema.Fields {
-		var node parquet.Node
-
-		switch field.Type {
-		case "int":
-			node = parquet.Leaf(parquet.Int32Type)
-		case "long":
-			node = parquet.Leaf(parquet.Int64Type)
-		case "string":
-			node = parquet.Leaf(parquet.ByteArrayType)
-		case "double":
-			node = parquet.Leaf(parquet.DoubleType)
-		case "float":
-			node = parquet.Leaf(parquet.FloatType)
-		case "boolean":
-			node = parquet.Leaf(parquet.BooleanType)
-		case "date":
-			node = parquet.Date()
-		case "timestamp":
-			node = parquet.Timestamp(parquet.Microsecond)
-		case "timestamptz":
-			node = parquet.Timestamp(parquet.Microsecond)
-		case "binary":
-			node = parquet.Leaf(parquet.ByteArrayType)
-		default:
-			// Default to string for unknown types
-			node = parquet.Leaf(parquet.ByteArrayType)
-		}
-
-		if !field.Required {
-			node = parquet.Optional(node)
-		}
-		root[field.Name] = node
-	}
-
-	return parquet.NewSchema("schema", root), nil
-}

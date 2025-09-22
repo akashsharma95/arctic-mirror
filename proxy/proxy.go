@@ -50,6 +50,14 @@ func NewDuckDBProxy(cfg *config.Config) (*DuckDBProxy, error) {
 		return nil, fmt.Errorf("loading extensions: %w", err)
 	}
 
+    // Attach Iceberg catalog based on config.Iceberg.Path so clients can read tables directly
+    if cfg != nil && cfg.Iceberg.Path != "" {
+        attach := fmt.Sprintf("ATTACH '%s' AS am_iceberg (TYPE iceberg);", cfg.Iceberg.Path)
+        if _, err := db.Exec(attach); err != nil {
+            return nil, fmt.Errorf("attaching iceberg catalog: %w", err)
+        }
+    }
+
 	// Create listener
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Proxy.Port))
 	if err != nil {
