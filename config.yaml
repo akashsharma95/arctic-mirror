@@ -1,5 +1,5 @@
 postgres:
-  host: localhost
+  host: postgres
   port: 5432
   user: replicator
   password: secret
@@ -10,9 +10,20 @@ postgres:
 tables:
   - schema: public
     name: users
+  - schema: public
+    name: orders
+  - schema: public
+    name: products
 
 iceberg:
-  path: /tmp/warehouse
+  path: /app/warehouse
+  catalog_endpoint: http://iceberg-catalog:8181
+  client_id: admin
+  client_secret: password
+  s3_endpoint: http://minio:9000
+  s3_access_key_id: admin
+  s3_secret_access_key: password
 
 proxy:
   port: 5433
+

@@ -23,7 +23,7 @@ type Replicator struct {
 	config          *config.Config
 	dbConn          *pgx.Conn
 	replicationConn *pgconn.PgConn
-	writer          *iceberg.Writer
+	writer          *iceberg.DuckDBWriter
 	schemaManager   *schema.Manager
 	checkpoint      *LSNCheckpoint
 }
@@ -67,10 +67,10 @@ func NewReplicator(cfg *config.Config) (*Replicator, error) {
 		return nil, fmt.Errorf("connecting to postgres for replication: %w", err)
 	}
 
-	// Initialize Iceberg writer
-	writer, err := iceberg.NewWriter(cfg.Iceberg.Path, schemaManager)
+	// Initialize DuckDB-based Iceberg writer
+	writer, err := iceberg.NewDuckDBWriter(cfg.Iceberg.Path, schemaManager, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("creating iceberg writer: %w", err)
+		return nil, fmt.Errorf("creating duckdb iceberg writer: %w", err)
 	}
 
 	// Initialize LSN checkpoint under Iceberg path
@@ -255,19 +255,24 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.schemaManager.HandleRelationMessage(m); err != nil {
 					return fmt.Errorf("handling relation message: %w", err)
 				}
-			
+
 			case *pglogrepl.BeginMessage:
 				// Handle begin
 				metrics.ReplicationMessagesTotal.WithLabelValues("begin").Inc()
 				log.Println("Begin transaction")
-			
+
 			case *pglogrepl.CommitMessage:
 				// Handle commit
 				metrics.ReplicationMessagesTotal.WithLabelValues("commit").Inc()
-				if err := r.writer.Commit(); err != nil {
-					return fmt.Errorf("committing: %w", err)
+				// Write accumulated data to Iceberg tables
+				if err := r.writer.WriteToIceberg(); err != nil {
+					log.Printf("Warning: Error writing to Iceberg: %v", err)
 				}
-			
+				// Close all active table writers to create Iceberg metadata files
+				if err := r.writer.CloseAllWriters(); err != nil {
+					log.Printf("Warning: Error closing table writers: %v", err)
+				}
+
 			case *pglogrepl.InsertMessageV2:
 				metrics.ReplicationMessagesTotal.WithLabelValues("insert").Inc()
 				log.Printf("insert for xid %d\n", m.Xid)
@@ -278,7 +283,7 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteInsert(m, rel); err != nil {
 					return fmt.Errorf("writing insert: %w", err)
 				}
-			
+
 			case *pglogrepl.UpdateMessageV2:
 				metrics.ReplicationMessagesTotal.WithLabelValues("update").Inc()
 				log.Printf("update for xid %d\n", m.Xid)
@@ -289,7 +294,7 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteUpdate(m, rel); err != nil {
 					return fmt.Errorf("writing update: %w", err)
 				}
-			
+
 			case *pglogrepl.DeleteMessageV2:
 				metrics.ReplicationMessagesTotal.WithLabelValues("delete").Inc()
 				log.Printf("delete for xid %d\n", m.Xid)
@@ -300,11 +305,11 @@ func (r *Replicator) handleReplication(ctx context.Context) error {
 				if err := r.writer.WriteDelete(m, rel); err != nil {
 					return fmt.Errorf("writing delete: %w", err)
 				}
-			
+
 			case *pglogrepl.LogicalDecodingMessageV2:
 				metrics.ReplicationMessagesTotal.WithLabelValues("logical_decoding").Inc()
 				log.Printf("Logical decoding message")
-			
+
 			case *pglogrepl.StreamStartMessageV2:
 				metrics.ReplicationMessagesTotal.WithLabelValues("stream_start").Inc()
 				inStream = true
@@ -344,22 +349,28 @@ func (r *Replicator) GetReplicationConn() *pgconn.PgConn {
 // Close closes all connections and cleans up resources
 func (r *Replicator) Close() error {
 	var errors []string
-	
+
 	if r.dbConn != nil {
 		if err := r.dbConn.Close(context.Background()); err != nil {
 			errors = append(errors, fmt.Sprintf("database connection: %v", err))
 		}
 	}
-	
+
 	if r.replicationConn != nil {
 		if err := r.replicationConn.Close(context.Background()); err != nil {
 			errors = append(errors, fmt.Sprintf("replication connection: %v", err))
 		}
 	}
-	
+
+	if r.writer != nil {
+		if err := r.writer.Close(); err != nil {
+			errors = append(errors, fmt.Sprintf("iceberg writer: %v", err))
+		}
+	}
+
 	if len(errors) > 0 {
 		return fmt.Errorf("errors during shutdown: %s", strings.Join(errors, "; "))
 	}
-	
+
 	return nil
 }

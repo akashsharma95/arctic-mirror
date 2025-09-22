@@ -1,7 +1,7 @@
 # Arctic Mirror Makefile
 # Provides commands to build, test, and run the application
 
-.PHONY: help build test test-race clean run docker-build docker-run docker-stop docker-clean lint fmt deps install-tools status dev rebuild compactor integration-test
+.PHONY: help build test test-race clean run docker-build docker-run docker-stop docker-clean lint fmt deps install-tools status dev rebuild integration-test
 
 # Default target
 help:
@@ -9,7 +9,6 @@ help:
 	@echo ""
 	@echo "Building:"
 	@echo "  build          - Build the main application binary"
-	@echo "  compactor      - Build the compactor binary"
 	@echo "  clean          - Clean build artifacts"
 	@echo ""
 	@echo "Testing:"
@@ -40,14 +39,8 @@ help:
 # Build the main application
 build:
 	@echo "Building Arctic Mirror..."
-	go build -o arctic-mirror ./main.go
+	go build -o arctic-mirror ./cmd/arctic-mirror
 	@echo "Build complete: arctic-mirror"
-
-# Build the compactor binary
-compactor:
-	@echo "Building Arctic Mirror Compactor..."
-	go build -o arctic-compactor ./cmd/compactor/main.go
-	@echo "Build complete: arctic-compactor"
 
 # Run tests
 test:
@@ -72,7 +65,7 @@ integration-test:
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
-	rm -f arctic-mirror arctic-compactor
+	rm -f arctic-mirror
 	go clean
 	@echo "Clean complete"
 
@@ -144,7 +137,6 @@ status:
 	@echo ""
 	@echo "Build Status:"
 	@if [ -f arctic-mirror ]; then echo "✓ Main binary: arctic-mirror"; else echo "✗ Main binary: not built"; fi
-	@if [ -f arctic-compactor ]; then echo "✓ Compactor binary: arctic-compactor"; else echo "✗ Compactor binary: not built"; fi
 
 # Development mode with auto-reload
 dev:
@@ -159,5 +151,5 @@ dev:
 	fi
 
 # Rebuild everything
-rebuild: clean deps build compactor
+rebuild: clean deps build
 	@echo "Rebuild complete"

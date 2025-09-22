@@ -1,14 +1,13 @@
 # Arctic Mirror
 
-Arctic Mirror is a high-performance data replication system that captures PostgreSQL changes in real-time and stores them in Apache Iceberg format. It provides a DuckDB proxy for querying the replicated data with PostgreSQL compatibility.
+Arctic Mirror is a high-performance data replication system that captures PostgreSQL changes in real-time and stores them in Apache Iceberg format using DuckDB's native Iceberg extension. It provides a DuckDB proxy for querying the replicated data with PostgreSQL compatibility.
 
 ## Features
 
 - **Real-time PostgreSQL Replication**: Captures changes using logical replication
-- **Apache Iceberg Storage**: Stores data in open, efficient Iceberg format
+- **Apache Iceberg Storage**: Stores data in open, efficient Iceberg format using DuckDB's native Iceberg extension
 - **DuckDB Proxy**: PostgreSQL-compatible query interface
 - **Health Monitoring**: Built-in health checks and Prometheus metrics
-- **Iceberg Compaction**: Background compaction scheduler and on-demand trigger
 - **Proxy Auth & Slow Query Logging**: Optional username/password auth and slow query logging in DuckDB proxy
 - **WAL Checkpointing**: Replication resumes from last persisted LSN
 - **Docker Support**: Easy deployment with Docker and Docker Compose
@@ -17,7 +16,7 @@ Arctic Mirror is a high-performance data replication system that captures Postgr
 ## Architecture
 
 ```
-PostgreSQL → Logical Replication → Arctic Mirror → Iceberg Files
+PostgreSQL → Logical Replication → Arctic Mirror → DuckDB Iceberg Extension → Iceberg Files
                                     ↓
                               DuckDB Proxy ← Clients
 ```
@@ -25,10 +24,9 @@ PostgreSQL → Logical Replication → Arctic Mirror → Iceberg Files
 ### Components
 
 - **Replicator**: Handles PostgreSQL logical replication
-- **Iceberg Writer**: Converts replication events to Iceberg format
+- **DuckDB Iceberg Writer**: Converts replication events to Iceberg format using DuckDB's native extension
 - **DuckDB Proxy**: Provides PostgreSQL-compatible query interface
 - **Health Monitor**: Monitors system health and provides metrics
-- **Storage Layer**: Supports local filesystem and S3 storage
 
 ## Quick Start
 
@@ -37,6 +35,7 @@ PostgreSQL → Logical Replication → Arctic Mirror → Iceberg Files
 - Go 1.24+
 - Docker and Docker Compose (for containerized deployment)
 - PostgreSQL 15+ with logical replication enabled
+- DuckDB 1.4.0+ (for Iceberg extension support)
 
 ### Local Development
 
@@ -119,10 +118,6 @@ proxy:
   auth_password: ""     # Optional; required if auth_user is set
   slow_query_millis: 0   # Optional; log queries slower than N ms
 
-compaction:
-  enabled: true          # Enable background compaction
-  interval_seconds: 3600 # How often to run background compaction
-  parallelism: 4         # Number of parallel workers
 ```
 
 ### Environment Variables
@@ -132,6 +127,28 @@ compaction:
 - `POSTGRES_USER`: PostgreSQL user
 - `POSTGRES_PASSWORD`: PostgreSQL password
 - `POSTGRES_DB`: PostgreSQL database
+
+## DuckDB Iceberg Integration
+
+Arctic Mirror leverages DuckDB's native Iceberg extension (available in DuckDB 1.4.0+) to provide efficient and reliable Iceberg table creation and management. This integration offers several advantages:
+
+### Benefits
+
+- **Native Performance**: Uses DuckDB's optimized Iceberg implementation
+- **Automatic Metadata Management**: DuckDB handles Iceberg metadata, snapshots, and manifest files
+- **Fallback Support**: Automatically falls back to Parquet format if Iceberg extension is not available
+- **Simplified Maintenance**: Reduces custom code complexity and maintenance burden
+
+### How It Works
+
+1. **Data Ingestion**: PostgreSQL replication events are captured and stored in temporary DuckDB tables
+2. **Iceberg Creation**: When committing transactions, data is written to Iceberg format using DuckDB's extension
+3. **Metadata Management**: DuckDB automatically handles Iceberg metadata, snapshots, and manifest files
+4. **Query Interface**: The DuckDB proxy provides seamless access to Iceberg tables
+
+### Configuration
+
+The system automatically detects and uses DuckDB's Iceberg extension when available. No additional configuration is required beyond the standard setup.
 
 ## Usage
 
@@ -155,7 +172,6 @@ The application provides health check endpoints:
 - **Health Check**: `GET /health`
 - **Detailed Health**: `GET /health/detailed`
 - **Metrics**: `GET /metrics`
- - **Trigger Compaction**: `POST /admin/compact` (when compaction is enabled)
 
 ### Querying Data
 
@@ -191,6 +207,8 @@ GROUP BY status;
 
 ```
 arctic-mirror/
+├── cmd/             # Application binaries
+│   └── arctic-mirror/ # Main application
 ├── config/          # Configuration management
 ├── health/          # Health monitoring
 ├── iceberg/         # Iceberg format handling
@@ -198,7 +216,7 @@ arctic-mirror/
 ├── replication/     # PostgreSQL replication
 ├── schema/          # Schema management
 ├── storage/         # Storage abstractions
-├── main.go          # Main application
+├── tests/           # Integration tests
 ├── Dockerfile       # Docker configuration
 ├── docker-compose.yml # Docker Compose setup
 ├── Makefile         # Development tasks
@@ -294,6 +312,11 @@ Structured logging with different levels:
    - Check firewall settings
    - Ensure DuckDB extensions are loaded
 
+5. **Iceberg Extension Not Available**
+   - Verify DuckDB version is 1.4.0 or higher
+   - Check that the Iceberg extension can be installed
+   - System will automatically fall back to Parquet format
+
 ### Debug Mode
 
 Enable verbose logging by setting log level:
@@ -330,7 +353,7 @@ curl http://localhost:8080/metrics
 
 - Use SSD storage for Iceberg files
 - Optimize Parquet compression
-- Consider partitioning strategies
+- Consider partitioning strategies (handled by DuckDB)
 
 ### Proxy Performance
 
@@ -371,7 +394,7 @@ For support and questions:
 
 - [ ] S3 storage backend
 - [ ] Additional database support
-- [ ] Advanced partitioning strategies
+- [ ] Advanced partitioning strategies (via DuckDB)
 - [ ] Real-time analytics
 - [ ] Kubernetes deployment
 - [ ] Performance benchmarks

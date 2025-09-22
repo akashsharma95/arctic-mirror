@@ -25,7 +25,13 @@ type Config struct {
 	} `yaml:"tables"`
 
 	Iceberg struct {
-		Path string `yaml:"path"`
+		Path              string `yaml:"path"`
+		CatalogEndpoint   string `yaml:"catalog_endpoint"`
+		ClientID          string `yaml:"client_id"`
+		ClientSecret      string `yaml:"client_secret"`
+		S3Endpoint        string `yaml:"s3_endpoint"`
+		S3AccessKeyID     string `yaml:"s3_access_key_id"`
+		S3SecretAccessKey string `yaml:"s3_secret_access_key"`
 	} `yaml:"iceberg"`
 
 	Proxy struct {
@@ -34,12 +40,6 @@ type Config struct {
 		AuthPassword    string `yaml:"auth_password"`
 		SlowQueryMillis int    `yaml:"slow_query_millis"`
 	} `yaml:"proxy"`
-
-	Compaction struct {
-		Enabled         bool `yaml:"enabled"`
-		IntervalSeconds int  `yaml:"interval_seconds"`
-		Parallelism     int  `yaml:"parallelism"`
-	} `yaml:"compaction"`
 }
 
 // Validate checks if the configuration is valid
@@ -93,16 +93,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Proxy.SlowQueryMillis < 0 {
 		errors = append(errors, "proxy.slow_query_millis must be >= 0")
-	}
-
-	// Validate compaction configuration (only if enabled)
-	if c.Compaction.Enabled {
-		if c.Compaction.IntervalSeconds < 0 {
-			errors = append(errors, "compaction.interval_seconds must be >= 0")
-		}
-		if c.Compaction.Parallelism < 0 {
-			errors = append(errors, "compaction.parallelism must be >= 0")
-		}
 	}
 
 	if len(errors) > 0 {

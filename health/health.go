@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"arctic-mirror/config"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -22,11 +23,11 @@ const (
 
 // Component represents a system component with health information
 type Component struct {
-	Name        string            `json:"name"`
-	Status      Status            `json:"status"`
-	Message     string            `json:"message,omitempty"`
-	LastCheck   time.Time         `json:"last_check"`
-	Details     map[string]string `json:"details,omitempty"`
+	Name      string            `json:"name"`
+	Status    Status            `json:"status"`
+	Message   string            `json:"message,omitempty"`
+	LastCheck time.Time         `json:"last_check"`
+	Details   map[string]string `json:"details,omitempty"`
 }
 
 // HealthChecker defines the interface for health checks
@@ -45,22 +46,22 @@ type SystemHealth struct {
 
 // Manager manages health checks for the system
 type Manager struct {
-	config       *config.Config
-	checkers     map[string]HealthChecker
-	startTime    time.Time
-	mu           sync.RWMutex
-	httpServer   *http.Server
-	checkResults map[string]Component
+	config         *config.Config
+	checkers       map[string]HealthChecker
+	startTime      time.Time
+	mu             sync.RWMutex
+	httpServer     *http.Server
+	checkResults   map[string]Component
 	customHandlers map[string]http.Handler
 }
 
 // NewManager creates a new health manager
 func NewManager(cfg *config.Config) *Manager {
 	return &Manager{
-		config:       cfg,
-		checkers:     make(map[string]HealthChecker),
-		startTime:    time.Now(),
-		checkResults: make(map[string]Component),
+		config:         cfg,
+		checkers:       make(map[string]HealthChecker),
+		startTime:      time.Now(),
+		checkResults:   make(map[string]Component),
 		customHandlers: make(map[string]http.Handler),
 	}
 }
@@ -92,12 +93,12 @@ func (m *Manager) RunHealthChecks(ctx context.Context) SystemHealth {
 		component := checker.Check(ctx)
 		component.LastCheck = time.Now()
 		component.Name = name
-		
+
 		// Update stored results
 		m.checkResults[name] = component
-		
+
 		components = append(components, component)
-		
+
 		// Determine overall status
 		switch component.Status {
 		case StatusUnhealthy:
@@ -122,7 +123,7 @@ func (m *Manager) RunHealthChecks(ctx context.Context) SystemHealth {
 func (m *Manager) GetComponentHealth(name string) (Component, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	component, exists := m.checkResults[name]
 	return component, exists
 }
@@ -130,11 +131,11 @@ func (m *Manager) GetComponentHealth(name string) (Component, bool) {
 // StartHTTPServer starts the health check HTTP server
 func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 	mux := http.NewServeMux()
-	
+
 	// Health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		health := m.RunHealthChecks(ctx)
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		if health.Status == StatusHealthy {
 			w.WriteHeader(http.StatusOK)
@@ -143,16 +144,16 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		
+
 		// TODO: Add JSON marshaling
-		fmt.Fprintf(w, `{"status":"%s","timestamp":"%s","uptime":"%s"}`, 
+		fmt.Fprintf(w, `{"status":"%s","timestamp":"%s","uptime":"%s"}`,
 			health.Status, health.Timestamp.Format(time.RFC3339), health.Uptime)
 	})
-	
+
 	// Detailed health endpoint
 	mux.HandleFunc("/health/detailed", func(w http.ResponseWriter, r *http.Request) {
 		health := m.RunHealthChecks(ctx)
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		if health.Status == StatusHealthy {
 			w.WriteHeader(http.StatusOK)
@@ -161,12 +162,12 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
-		
+
 		// TODO: Add JSON marshaling
-		fmt.Fprintf(w, `{"status":"%s","timestamp":"%s","uptime":"%s","components":%d}`, 
+		fmt.Fprintf(w, `{"status":"%s","timestamp":"%s","uptime":"%s","components":%d}`,
 			health.Status, health.Timestamp.Format(time.RFC3339), health.Uptime, len(health.Components))
 	})
-	
+
 	// Metrics endpoint (Prometheus)
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -176,19 +177,19 @@ func (m *Manager) StartHTTPServer(ctx context.Context, port int) error {
 		mux.Handle(path, handler)
 	}
 	m.mu.RUnlock()
-	
+
 	m.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
 		Handler: mux,
 	}
-	
+
 	// Start server in goroutine
 	go func() {
 		if err := m.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("Health server error: %v\n", err)
 		}
 	}()
-	
+
 	return nil
 }
 
