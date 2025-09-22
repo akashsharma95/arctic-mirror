@@ -1,5 +1,5 @@
 postgres:
-  host: localhost
+  host: postgres
   port: 5432
   user: replicator
   password: secret
@@ -12,7 +12,7 @@ tables:
     name: users
 
 iceberg:
-  path: /tmp/warehouse
+  path: /data/warehouse
 
 proxy:
   port: 5433

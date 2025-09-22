@@ -36,6 +36,7 @@ services:
       - ./config.yaml:/app/config/config.yaml:ro
       - warehouse_data:/data/warehouse
     environment:
+      - ICEBERG_PATH=/data/warehouse
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=replicator
@@ -49,25 +50,7 @@ services:
       start_period: 40s
     restart: unless-stopped
 
-  arctic-compactor:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: arctic-mirror-compactor
-    depends_on:
-      arctic-mirror:
-        condition: service_healthy
-    volumes:
-      - ./config.yaml:/app/config/config.yaml:ro
-      - warehouse_data:/data/warehouse
-    environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=replicator
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=mydb
-    command: ["/app/arctic-compactor", "-config", "/app/config/config.yaml", "-interval", "1h", "-parallelism", "4"]
-    restart: unless-stopped
+  # Compactor removed
 
   test-client:
     image: postgres:15-alpine
@@ -80,12 +63,16 @@ services:
     command: >
       sh -c "
         echo 'Waiting for Arctic Mirror to be ready...' &&
-        until pg_isready -h arctic-mirror -p 5433 -U replicator; do
+        until wget --no-verbose --tries=1 --spider http://arctic-mirror:8080/health; do
           sleep 2;
         done &&
-        echo 'Testing connection to Arctic Mirror proxy...' &&
-        psql -h arctic-mirror -p 5433 -U replicator -d mydb -c 'SELECT version();' &&
-        echo 'Connection test successful!'
+        echo 'Inserting a test row into Postgres...' &&
+        psql -h postgres -p 5432 -U replicator -d mydb -c "INSERT INTO public.users (username, email) VALUES ('compose_user', 'compose@example.com');" &&
+        echo 'Waiting for replication to apply...' &&
+        sleep 5 &&
+        echo 'Querying DuckDB proxy for replicated row...' &&
+        psql -h arctic-mirror -p 5433 -U replicator -d mydb -c \"SELECT COUNT(*) AS replicated FROM am_iceberg.public.users WHERE username = 'compose_user';\" &&
+        echo 'End-to-end replication test completed.'
       "
     restart: "no"
 

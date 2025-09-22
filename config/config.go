@@ -35,11 +35,6 @@ type Config struct {
 		SlowQueryMillis int    `yaml:"slow_query_millis"`
 	} `yaml:"proxy"`
 
-	Compaction struct {
-		Enabled         bool `yaml:"enabled"`
-		IntervalSeconds int  `yaml:"interval_seconds"`
-		Parallelism     int  `yaml:"parallelism"`
-	} `yaml:"compaction"`
 }
 
 // Validate checks if the configuration is valid
@@ -95,15 +90,7 @@ func (c *Config) Validate() error {
 		errors = append(errors, "proxy.slow_query_millis must be >= 0")
 	}
 
-	// Validate compaction configuration (only if enabled)
-	if c.Compaction.Enabled {
-		if c.Compaction.IntervalSeconds < 0 {
-			errors = append(errors, "compaction.interval_seconds must be >= 0")
-		}
-		if c.Compaction.Parallelism < 0 {
-			errors = append(errors, "compaction.parallelism must be >= 0")
-		}
-	}
+    // Compaction removed
 
 	if len(errors) > 0 {
 		return fmt.Errorf("configuration validation failed: %s", strings.Join(errors, "; "))

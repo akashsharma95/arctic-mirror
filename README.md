@@ -8,7 +8,7 @@ Arctic Mirror is a high-performance data replication system that captures Postgr
 - **Apache Iceberg Storage**: Stores data in open, efficient Iceberg format
 - **DuckDB Proxy**: PostgreSQL-compatible query interface
 - **Health Monitoring**: Built-in health checks and Prometheus metrics
-- **Iceberg Compaction**: Background compaction scheduler and on-demand trigger
+// Compaction removed
 - **Proxy Auth & Slow Query Logging**: Optional username/password auth and slow query logging in DuckDB proxy
 - **WAL Checkpointing**: Replication resumes from last persisted LSN
 - **Docker Support**: Easy deployment with Docker and Docker Compose
@@ -119,10 +119,7 @@ proxy:
   auth_password: ""     # Optional; required if auth_user is set
   slow_query_millis: 0   # Optional; log queries slower than N ms
 
-compaction:
-  enabled: true          # Enable background compaction
-  interval_seconds: 3600 # How often to run background compaction
-  parallelism: 4         # Number of parallel workers
+# Compaction removed
 ```
 
 ### Environment Variables
@@ -155,7 +152,7 @@ The application provides health check endpoints:
 - **Health Check**: `GET /health`
 - **Detailed Health**: `GET /health/detailed`
 - **Metrics**: `GET /metrics`
- - **Trigger Compaction**: `POST /admin/compact` (when compaction is enabled)
+// Compaction endpoint removed
 
 ### Querying Data
 

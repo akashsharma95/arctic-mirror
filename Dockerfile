@@ -19,8 +19,7 @@ COPY . .
 # Build main application
 RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o arctic-mirror ./main.go
 
-# Build compactor binary
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o arctic-compactor ./cmd/compactor/main.go
+# Compactor removed
 
 # Final stage
 FROM alpine:latest
@@ -37,13 +36,13 @@ RUN mkdir -p /data/warehouse /app/config && \
     chown -R appuser:appgroup /data /app
 
 # Copy binaries from builder
-COPY --from=builder /app/arctic-mirror /app/arctic-compactor /app/
+COPY --from=builder /app/arctic-mirror /app/
 
 # Copy configuration
 COPY --from=builder /app/config.yaml /app/config/
 
 # Set ownership
-RUN chown appuser:appgroup /app/arctic-mirror /app/arctic-compactor /app/config.yaml
+RUN chown appuser:appgroup /app/arctic-mirror /app/config.yaml
 
 # Switch to non-root user
 USER appuser
